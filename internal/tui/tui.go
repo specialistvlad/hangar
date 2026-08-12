@@ -1,13 +1,13 @@
 // Package tui renders the live fleet dashboard.
 //
-// The model is a pure reader. It never owns a runner process, so quitting it
-// cannot stop a build — that is why the footer can promise runners keep running
-// and why stopping the fleet is a separate, explicit `make 0`.
+// The model never owns a runner process, so quitting it cannot stop a build —
+// that is why the footer can promise runners keep running. The one thing it
+// writes is a +/- scale, which hands off to the same fleet reconcile `make N`
+// uses and then goes back to reading.
 package tui
 
 import (
 	"context"
-	"sort"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -46,11 +46,14 @@ type Model struct {
 	flt     *fleet.Fleet
 	sampler *metrics.Sampler
 	events  chan logs.Event
+	ctx     context.Context
 	cancel  context.CancelFunc
 
-	workers map[int]*workerState
-	lines   []logLine
-	snap    metrics.Snapshot
+	workers  map[int]*workerState
+	watching map[int]context.CancelFunc
+	lines    []logLine
+	snap     metrics.Snapshot
+	scale    scaleStatus
 
 	focus     int // 0 shows every worker
 	follow    bool
@@ -69,23 +72,20 @@ func New(f *fleet.Fleet) *Model {
 	ti.CharLimit = 64
 
 	return &Model{
-		flt:     f,
-		sampler: metrics.NewSampler(),
-		events:  make(chan logs.Event, 1024),
-		workers: map[int]*workerState{},
-		follow:  true,
-		filter:  ti,
+		flt:      f,
+		sampler:  metrics.NewSampler(),
+		events:   make(chan logs.Event, 1024),
+		workers:  map[int]*workerState{},
+		watching: map[int]context.CancelFunc{},
+		follow:   true,
+		filter:   ti,
 	}
 }
 
-// Init starts one log watcher per worker and the metrics ticker.
+// Init starts the log watchers and the metrics ticker.
 func (m *Model) Init() tea.Cmd {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel = cancel
+	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.refreshWorkers()
-	for _, w := range m.flt.List() {
-		go logs.Watch(ctx, w.Index, w.Dir, m.events)
-	}
 	return tea.Batch(tick(), waitFor(m.events))
 }
 
@@ -116,6 +116,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.apply(msg)
 		return m, waitFor(m.events)
 
+	case scaleDoneMsg:
+		m.scale.finish(msg.err)
+		m.refreshWorkers()
+		m.layout() // the worker table just changed height
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.onKey(msg)
 	}
@@ -141,6 +147,10 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = 0
 		m.render()
 		return m, nil
+	case "+", "=":
+		return m, m.scaleBy(1)
+	case "-", "_":
+		return m, m.scaleBy(-1)
 	case "f":
 		m.follow = !m.follow
 		if m.follow {
@@ -177,57 +187,4 @@ func (m *Model) filterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.render()
 		return m, cmd
 	}
-}
-
-func (m *Model) apply(e logs.Event) {
-	w := m.workers[e.Worker]
-	if w == nil {
-		w = &workerState{Index: e.Worker, Running: true}
-		m.workers[e.Worker] = w
-	}
-	switch e.Kind {
-	case logs.KindJobStart:
-		w.Job, w.Busy, w.Since, w.LastResult = e.Text, true, time.Now(), ""
-	case logs.KindJobEnd:
-		w.Busy, w.Job, w.LastResult = false, "", e.Result
-	case logs.KindLine:
-		if collapseInto(m.lines, e.Worker, e.Text) {
-			m.render()
-			return
-		}
-		m.lines = append(m.lines, logLine{e.Worker, e.Text})
-		if len(m.lines) > maxLines {
-			m.lines = m.lines[len(m.lines)-maxLines:]
-		}
-		m.render()
-	}
-}
-
-// refreshWorkers syncs the model against what is actually on disk, so a fleet
-// scaled from another terminal shows up without restarting the dashboard.
-func (m *Model) refreshWorkers() {
-	seen := map[int]bool{}
-	for _, w := range m.flt.List() {
-		seen[w.Index] = true
-		st := m.workers[w.Index]
-		if st == nil {
-			st = &workerState{Index: w.Index, Name: w.Name}
-			m.workers[w.Index] = st
-		}
-		st.Running = w.Running
-	}
-	for i := range m.workers {
-		if !seen[i] {
-			delete(m.workers, i)
-		}
-	}
-}
-
-func (m *Model) sorted() []*workerState {
-	out := make([]*workerState, 0, len(m.workers))
-	for _, w := range m.workers {
-		out = append(out, w)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Index < out[j].Index })
-	return out
 }

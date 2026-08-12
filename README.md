@@ -176,7 +176,7 @@ gh api /user/memberships/orgs/YOUR-ORG --jq .role   # must print "admin"
 | | |
 |---|---|
 | `make <0-32>` | Update the runner, scale the fleet to N, then open the dashboard |
-| `make watch` | Dashboard only — starts, stops and changes nothing |
+| `make watch` | Dashboard — scaling with `+`/`-` is the only thing it changes |
 | `make update` | Fetch the newest `actions/runner` release into `.cache/` |
 | `make status` | One-shot summary, no TUI |
 | `make check` | vet + lint + file-length + tests, in parallel |
@@ -202,8 +202,12 @@ fleet is always the explicit `make 0`.
  w1│ #30 [release 3/4] COPY api/entrypoint.sh
  w2│ #12 [4/9] RUN npm ci
 ────────────────────────────────────────────────────────────
- 1-9 focus · a all · f follow · / filter · q quit (runners keep running)
+ +/- scale · 1-9 focus · a all · f follow · / filter · q quit (runners keep running)
 ```
+
+`+` and `-` add or remove a worker without leaving the dashboard — the same
+reconcile `make N` runs, so scaling up takes as long as registering a runner
+does. `-` refuses to remove a worker that is mid-job; `make N` still forces it.
 
 `1`–`9` focus one worker, `a` returns to all, `f` toggles follow, `/` filters,
 scrolling up pauses follow automatically.
@@ -216,10 +220,11 @@ builds start dying on ENOSPC.
 ## How it works
 
 ```
-make N ──> update ──> scale ──> watch          watch is a pure READER
-              │          │         │            tails files, samples ps
-              ▼          ▼         ▼            Ctrl-C kills only the TUI
-          .cache/    launchd    _diag/*.log
+make N ──> update ──> scale ──> watch          watch is a READER, except for
+              │        ▲ │         │           +/-, which re-enters scale
+              │        └─│─── +/- ─┘
+              ▼          ▼         ▼           tails files, samples ps
+          .cache/    launchd    _diag/*.log    Ctrl-C kills only the TUI
           tarball    plists     (runner writes these itself)
 ```
 

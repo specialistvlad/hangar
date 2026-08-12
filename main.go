@@ -21,7 +21,7 @@ import (
 const usage = `hangar — GitHub Actions runner fleet for one Mac
 
   hangar scale <0-32>   reconcile the fleet to N workers
-  hangar watch          live dashboard (quitting leaves runners running)
+  hangar watch          live dashboard; +/- scales (quitting leaves runners running)
   hangar update         fetch the newest runner release
   hangar status         one-shot fleet summary
 
@@ -89,9 +89,6 @@ func run(args []string) error {
 		return nil
 
 	case "watch":
-		if len(f.List()) == 0 {
-			return fmt.Errorf("no workers — run `make 4` first")
-		}
 		// AltScreen keeps the dashboard from shredding the user's scrollback.
 		p := tea.NewProgram(tui.New(f), tea.WithAltScreen(), tea.WithMouseCellMotion())
 		_, err := p.Run()

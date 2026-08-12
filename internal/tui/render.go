@@ -162,11 +162,14 @@ func (m *Model) View() string {
 	}
 	rule := stRule.Render(strings.Repeat("─", maxInt(m.w, 1)))
 
-	footer := stDim.Render(" 1-9 focus · a all · f follow · / filter · q quit (runners keep running)")
+	footer := stDim.Render(" +/- scale · 1-9 focus · a all · f follow · / filter · q quit (runners keep running)")
 	if m.filtering {
 		footer = " " + m.filter.View()
 	} else if m.focus != 0 {
 		footer = stDim.Render(fmt.Sprintf(" focus w%d ·", m.focus)) + footer
+	}
+	if _, text := m.scale.read(); text != "" && !m.filtering {
+		footer = stWarn.Render(" "+text+" ·") + footer
 	}
 	if !m.follow {
 		footer = stWarn.Render(" [paused]") + footer
