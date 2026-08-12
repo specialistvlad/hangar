@@ -1,0 +1,54 @@
+version: "2"
+
+run:
+  timeout: 5m
+  # Dependencies are vendored so a lint run never reaches the network.
+  modules-download-mode: vendor
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - misspell
+    - godot
+    - noctx
+    - bodyclose
+    - exhaustive
+    - gocyclo
+    - gocognit
+    - funlen
+    - dupl
+  settings:
+    exhaustive:
+      # A switch with a default arm already handles every remaining case.
+      # Without this, any switch over bubbletea's ~90 key constants is an error.
+      default-signifies-exhaustive: true
+    misspell:
+      locale: US
+    godot:
+      scope: declarations
+      capital: false
+    gocyclo:
+      min-complexity: 30
+    gocognit:
+      min-complexity: 30
+    funlen:
+      lines: 100
+      statements: 60
+    dupl:
+      threshold: 200
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - godot
+          - funlen
+          - gocyclo
+          - gocognit
+          - dupl
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 5

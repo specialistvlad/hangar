@@ -1,0 +1,28 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # darwin/arm64 only, and the runner is what hangar drives — so the checks
+    # run on the one platform the code supports rather than a cheaper linux box.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Matches the Makefile's GO_VERSION pin, which makes the build reuse this
+      # Go instead of downloading a second one into .toolchain/.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: false
+
+      # Builds from the checkout alone. A package missing from the commit — the
+      # failure mode a local working tree cannot show you — fails here.
+      - run: make check

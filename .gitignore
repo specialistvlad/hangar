@@ -1,0 +1,17 @@
+# Secrets
+/.env
+
+# Self-contained toolchain and caches (see Makefile — all Go paths point here)
+/.toolchain/
+/.gopath/
+/.gocache/
+/.bin/
+
+# Runtime state: runner installs, downloaded tarballs, launchd stdout.
+# Anchored with a leading slash: an unanchored `logs/` also matches
+# internal/logs/, which silently kept that package out of every clone.
+/workers/
+/logs/
+/.cache/
+
+.DS_Store
