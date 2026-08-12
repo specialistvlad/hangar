@@ -53,7 +53,12 @@ type Model struct {
 	watching map[int]context.CancelFunc
 	lines    []logLine
 	snap     metrics.Snapshot
-	scale    scaleStatus
+
+	// want is the worker count the operator has asked for; scaling says whether
+	// a reconcile pass is chasing it right now.
+	want    int
+	scaling bool
+	status  progress
 
 	focus     int // 0 shows every worker
 	follow    bool
@@ -117,10 +122,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitFor(m.events)
 
 	case scaleDoneMsg:
-		m.scale.finish(msg.err)
-		m.refreshWorkers()
-		m.layout() // the worker table just changed height
-		return m, nil
+		return m, m.scaleDone(msg)
 
 	case tea.KeyMsg:
 		return m.onKey(msg)

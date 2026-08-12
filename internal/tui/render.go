@@ -168,8 +168,12 @@ func (m *Model) View() string {
 	} else if m.focus != 0 {
 		footer = stDim.Render(fmt.Sprintf(" focus w%d ·", m.focus)) + footer
 	}
-	if _, text := m.scale.read(); text != "" && !m.filtering {
-		footer = stWarn.Render(" "+text+" ·") + footer
+	if !m.filtering {
+		// The target leads, because with presses queued ahead of the reconcile it
+		// is the only thing that says where the fleet is actually heading.
+		if note := m.scaleNote(); note != "" {
+			footer = stWarn.Render(" "+note+" ·") + footer
+		}
 	}
 	if !m.follow {
 		footer = stWarn.Render(" [paused]") + footer

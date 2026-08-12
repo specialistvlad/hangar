@@ -206,8 +206,12 @@ fleet is always the explicit `make 0`.
 ```
 
 `+` and `-` add or remove a worker without leaving the dashboard — the same
-reconcile `make N` runs, so scaling up takes as long as registering a runner
-does. `-` refuses to remove a worker that is mid-job; `make N` still forces it.
+reconcile `make N` runs. The keys never block on it: each press moves the
+target, the footer shows where the fleet is heading (`→ 4 workers: creating
+mac-w3`), and one pass runs at a time until it gets there. So holding `+` is
+counting, not queueing four sequential registrations.
+
+`-` refuses to remove a worker that is mid-job; `make N` still forces it.
 
 `1`–`9` focus one worker, `a` returns to all, `f` toggles follow, `/` filters,
 scrolling up pauses follow automatically.
