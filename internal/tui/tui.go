@@ -55,10 +55,14 @@ type Model struct {
 	snap     metrics.Snapshot
 
 	// want is the worker count the operator has asked for; scaling says whether
-	// a reconcile pass is chasing it right now.
-	want    int
-	scaling bool
-	status  progress
+	// a reconcile pass is chasing it right now, note is the step it is on and
+	// scaleErr the last failure, kept on screen until the next press.
+	want       int
+	scaling    bool
+	scaleSince time.Time
+	note       string
+	scaleErr   string
+	progress   chan string
 
 	focus     int // 0 shows every worker
 	follow    bool
@@ -80,6 +84,7 @@ func New(f *fleet.Fleet) *Model {
 		flt:      f,
 		sampler:  metrics.NewSampler(),
 		events:   make(chan logs.Event, 1024),
+		progress: make(chan string, 16),
 		workers:  map[int]*workerState{},
 		watching: map[int]context.CancelFunc{},
 		follow:   true,
@@ -91,7 +96,7 @@ func New(f *fleet.Fleet) *Model {
 func (m *Model) Init() tea.Cmd {
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.refreshWorkers()
-	return tea.Batch(tick(), waitFor(m.events))
+	return tea.Batch(tick(), waitFor(m.events), waitProgress(m.progress))
 }
 
 func tick() tea.Cmd {
@@ -120,6 +125,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logs.Event:
 		m.apply(msg)
 		return m, waitFor(m.events)
+
+	case scaleMsg:
+		m.note = string(msg)
+		return m, waitProgress(m.progress)
 
 	case scaleDoneMsg:
 		return m, m.scaleDone(msg)

@@ -101,9 +101,13 @@ func (m *Model) headerLines() []string {
 		}
 	}
 
+	target := ""
+	if m.scaling {
+		target = stWarn.Render(fmt.Sprintf(" → %d", m.want))
+	}
 	title := stTitle.Render("hangar") + "  " +
-		stDim.Render(fmt.Sprintf("%d workers · %d busy · %s/%s",
-			len(m.workers), busy, cfg.Org, orDash(cfg.Group)))
+		stDim.Render(fmt.Sprintf("%d workers", len(m.workers))) + target +
+		stDim.Render(fmt.Sprintf(" · %d busy · %s/%s", busy, cfg.Org, orDash(cfg.Group)))
 
 	s := m.snap
 	host := fmt.Sprintf("%s  load %s %-5.2f   mem %s %s/%s   free %s",
@@ -131,6 +135,8 @@ func (m *Model) workerLines() []string {
 	for _, w := range m.sorted() {
 		var dot, detail string
 		switch {
+		case m.scaling && w.Index > m.want:
+			dot, detail = stWarn.Render("◌"), stWarn.Render("removing…")
 		case !w.Running:
 			dot, detail = stErr.Render("✗"), stErr.Render("stopped")
 		case w.Busy:
@@ -149,8 +155,9 @@ func (m *Model) workerLines() []string {
 		out = append(out, fmt.Sprintf(" %s %s  %s", dot,
 			prefixStyle(w.Index).Render(fmt.Sprintf("w%-2d", w.Index)), detail))
 	}
+	out = append(out, m.pendingLines()...)
 	if len(out) == 0 {
-		out = append(out, stDim.Render(" no workers — run `make 4` to create some"))
+		out = append(out, stDim.Render(" no workers — press + to add one"))
 	}
 	return out
 }
@@ -178,6 +185,10 @@ func (m *Model) View() string {
 	if !m.follow {
 		footer = stWarn.Render(" [paused]") + footer
 	}
+
+	// The scale note is prepended, so when the line no longer fits it is the help
+	// tail that gets cut rather than the state the operator is watching.
+	footer = lipgloss.NewStyle().MaxWidth(maxInt(m.w, 1)).Render(footer)
 
 	parts := append(m.headerLines(), rule)
 	parts = append(parts, m.workerLines()...)

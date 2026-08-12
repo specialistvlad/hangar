@@ -190,7 +190,7 @@ fleet is always the explicit `make 0`.
 ## The dashboard
 
 ```
- hangar        4 workers · 3 busy · your-org/your-runner-group
+ hangar        4 workers → 6 · 3 busy · your-org/your-runner-group
  host    load ▁▂▃▅▇█▇▅ 6.20    mem ▃▄▅▅ 21G/32G   free 164G
  docker  cpu  ▂▄▆█▇▅▃ 340 %    mem 6G
 ────────────────────────────────────────────────────────────
@@ -198,20 +198,25 @@ fleet is always the explicit `make 0`.
  ● w2   release (api) / build                   1m03s
  ● w3   release (docs) / build                    22s
  ○ w4   idle  last: Succeeded
+ ◌ w5   provisioning…
+ ◌ w6   queued
 ────────────────────────────────────────────────────────────
  w1│ #30 [release 3/4] COPY api/entrypoint.sh
  w2│ #12 [4/9] RUN npm ci
 ────────────────────────────────────────────────────────────
- +/- scale · 1-9 focus · a all · f follow · / filter · q quit (runners keep running)
+ → 6 workers · creating your-mac-w5 · 34s · +/- scale · 1-9 focus · a all · f follow · / fil
 ```
 
 `+` and `-` add or remove a worker without leaving the dashboard — the same
-reconcile `make N` runs. The keys never block on it: each press moves the
-target, the footer shows where the fleet is heading (`→ 4 workers: creating
-mac-w3`), and one pass runs at a time until it gets there. So holding `+` is
-counting, not queueing four sequential registrations.
+reconcile `make N` runs, so a new one takes as long as registering a runner
+does. The keys never block on it. A press moves a target and returns, and the
+screen shows that target before any of it has happened: `→ 6` in the header,
+a `◌` row per worker that does not exist yet, `removing…` on the ones on their
+way out, and the live provisioning step in the footer.
 
-`-` refuses to remove a worker that is mid-job; `make N` still forces it.
+Progress arrives as events rather than polling, so the footer moves when the
+reconcile does. `-` refuses to remove a worker that is mid-job; `make N` still
+forces it.
 
 `1`–`9` focus one worker, `a` returns to all, `f` toggles follow, `/` filters,
 scrolling up pauses follow automatically.

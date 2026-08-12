@@ -2,7 +2,7 @@ package tui
 
 import (
 	"fmt"
-	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -16,30 +16,20 @@ import (
 // Holding + therefore counts up immediately and the fleet catches up after.
 //
 // Everything that decides is in Update, which bubbletea runs single-threaded.
-// The only thing the scaling goroutine touches is the progress line, which
-// carries its own lock for that reason.
-type progress struct {
-	mu   sync.Mutex
-	text string
-}
-
-func (p *progress) set(text string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.text = text
-}
-
-func (p *progress) get() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.text
-}
+// The running pass only writes to a channel, which arrives as a message like
+// any log line does — so its progress reaches the screen the moment it happens
+// rather than on the next tick.
+type scaleMsg string
 
 // scaleDoneMsg reports one finished pass, and the count it reconciled to — the
 // target may have moved on while it ran.
 type scaleDoneMsg struct {
 	reached int
 	err     error
+}
+
+func waitProgress(ch <-chan string) tea.Cmd {
+	return func() tea.Msg { return scaleMsg(<-ch) }
 }
 
 // scaleBy nudges the desired worker count by delta.
@@ -57,61 +47,92 @@ func (m *Model) scaleBy(delta int) tea.Cmd {
 	// can, because there it is what the operator explicitly typed.
 	for _, w := range m.sorted() {
 		if w.Index > n && w.Busy {
-			m.status.set(fmt.Sprintf("w%d is busy — not removing it (use `make %d` to force)", w.Index, n))
+			m.scaleErr = fmt.Sprintf("w%d is busy — not removing it (use `make %d` to force)", w.Index, n)
 			return nil
 		}
 	}
 	if err := m.flt.Config().RequireGitHub(); err != nil {
-		m.status.set(err.Error())
+		m.scaleErr = err.Error()
 		return nil
 	}
 
-	m.want = n
+	m.want, m.scaleErr = n, ""
 	if m.scaling || n == have {
-		return nil // the running pass will pick the new target up when it lands
+		m.layout() // the pending rows changed; show them now, not after the pass
+		return nil
 	}
 	return m.startScale()
 }
 
 // startScale launches one reconcile pass toward the current target.
 func (m *Model) startScale() tea.Cmd {
-	m.scaling = true
-	n := m.want
-	m.status.set("")
-	return func() tea.Msg { return scaleDoneMsg{n, m.flt.Scale(n, m.status.set)} }
-}
+	m.scaling, m.scaleSince, m.note = true, time.Now(), ""
+	m.layout()
 
-// scaleNote is the footer's one line about scaling: the target while a pass is
-// running, with whatever step it is on, or the last error once it stopped.
-func (m *Model) scaleNote() string {
-	text := m.status.get()
-	if !m.scaling {
-		return text
+	n, ch := m.want, m.progress
+	return func() tea.Msg {
+		err := m.flt.Scale(n, func(line string) {
+			// Dropping a stale line beats blocking the reconcile on a screen that
+			// is not draining, e.g. after the dashboard has quit.
+			select {
+			case ch <- line:
+			default:
+			}
+		})
+		return scaleDoneMsg{n, err}
 	}
-	note := fmt.Sprintf("→ %d workers", m.want)
-	if text != "" {
-		note += ": " + text
-	}
-	return note
 }
 
 // scaleDone handles a finished pass and chases the target if it moved.
 func (m *Model) scaleDone(msg scaleDoneMsg) tea.Cmd {
-	m.scaling = false
+	m.scaling, m.note = false, ""
 	m.refreshWorkers()
-	m.layout() // the worker table just changed height
 
 	if msg.err != nil {
 		// Re-aim at reality: a failed pass leaves the fleet wherever it got to,
 		// and the next keypress should count from there rather than from a target
 		// that was never reached.
-		m.want = len(m.flt.List())
-		m.status.set(msg.err.Error())
+		m.want, m.scaleErr = len(m.flt.List()), msg.err.Error()
+		m.layout()
 		return nil
 	}
-	m.status.set("")
 	if m.want != msg.reached {
 		return m.startScale()
 	}
+	m.layout() // the worker table just changed height
 	return nil
+}
+
+// pendingLines renders the workers a keypress has asked for but the reconcile
+// has not created yet, so a press shows up in the table immediately instead of
+// a minute later when the runner finishes registering.
+func (m *Model) pendingLines() []string {
+	var out []string
+	for i := 1; i <= m.want; i++ {
+		if m.workers[i] != nil {
+			continue
+		}
+		// Workers are provisioned in ascending order, so the first missing one is
+		// the one being worked on and the rest are still waiting their turn.
+		state := stDim.Render("queued")
+		if len(out) == 0 && m.scaling {
+			state = stWarn.Render("provisioning…")
+		}
+		out = append(out, fmt.Sprintf(" %s %s  %s", stDim.Render("◌"),
+			prefixStyle(i).Render(fmt.Sprintf("w%-2d", i)), state))
+	}
+	return out
+}
+
+// scaleNote is the footer's line about scaling: the target and the step it is
+// on while a pass runs, or the last error once one stopped.
+func (m *Model) scaleNote() string {
+	if !m.scaling {
+		return m.scaleErr
+	}
+	note := fmt.Sprintf("→ %d workers", m.want)
+	if m.note != "" {
+		note += " · " + m.note
+	}
+	return note + " · " + dur(time.Since(m.scaleSince))
 }

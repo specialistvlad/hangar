@@ -73,6 +73,37 @@ func TestFailedPassReaimsAtReality(t *testing.T) {
 	}
 }
 
+// The whole point of the target being separate from the fleet is that the
+// screen shows it straight away, so assert on the rendered dashboard.
+func TestViewShowsPendingState(t *testing.T) {
+	m := model(t, 1)
+	m.w, m.h = 100, 30
+	m.scaleBy(2)
+
+	view := m.View()
+	for _, want := range []string{"→ 3", "w2", "provisioning…", "w3", "queued"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view is missing %q:\n%s", want, view)
+		}
+	}
+
+	// A progress line from the running pass arrives as a message, not a poll.
+	m.Update(scaleMsg("creating test-w2"))
+	if !strings.Contains(m.View(), "creating test-w2") {
+		t.Fatalf("progress line never reached the footer:\n%s", m.View())
+	}
+}
+
+func TestViewMarksWorkersBeingRemoved(t *testing.T) {
+	m := model(t, 2)
+	m.w, m.h = 100, 30
+	m.scaleBy(-1)
+
+	if !strings.Contains(m.View(), "removing…") {
+		t.Fatalf("w2 is not shown as going away:\n%s", m.View())
+	}
+}
+
 func TestScaleDownRefusesBusyWorker(t *testing.T) {
 	m := model(t, 2)
 	m.workers[2].Busy = true
