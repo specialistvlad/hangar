@@ -54,6 +54,10 @@ export GOCACHE     := $(ROOT)/.gocache
 export GOTOOLCHAIN := local
 export GOFLAGS     := -mod=vendor
 export HANGAR_ROOT := $(ROOT)
+# The pinned toolchain has to lead PATH, not just GOROOT: golangci-lint and
+# gotestsum shell out to whatever `go` they find, and finding an ambient one
+# under GOTOOLCHAIN=local fails outright rather than switching.
+export PATH        := $(GOROOT_DIR)/bin:$(PATH)
 
 COUNTS := $(shell seq 0 32)
 
