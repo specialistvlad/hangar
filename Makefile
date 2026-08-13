@@ -25,9 +25,14 @@ GO_DIR    := $(ROOT)/.toolchain/go
 # private one only when it does not. A vendored toolchain is ~260MB to produce a
 # ~10MB binary, so duplicating a Go that is already present buys nothing; the
 # download still guarantees a machine with no Go at all can build.
-ifeq ($(shell go env GOVERSION 2>/dev/null),go$(GO_VERSION))
+# GOTOOLCHAIN=local on the probes: without it, an ambient go run inside this
+# module auto-switches to the toolchain go.mod asks for and reports *that*
+# version, so a mismatched go looks like a match — and the build then runs the
+# ambient binary with GOTOOLCHAIN=local, which refuses the very switch the probe
+# relied on. Pinned to the binary's own version, the check means what it says.
+ifeq ($(shell GOTOOLCHAIN=local go env GOVERSION 2>/dev/null),go$(GO_VERSION))
 GO        := $(shell command -v go)
-GOROOT_DIR := $(shell go env GOROOT)
+GOROOT_DIR := $(shell GOTOOLCHAIN=local go env GOROOT)
 else
 GO        := $(GO_DIR)/bin/go
 GOROOT_DIR := $(GO_DIR)
