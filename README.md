@@ -99,6 +99,18 @@ make 4
 [Getting a token](#getting-a-token) for the click-by-click, and run `make status`
 to confirm it before scaling anything.
 
+Send a job to the fleet with the `hangar` label, which every worker registers with:
+
+```yaml
+runs-on: [self-hosted, hangar]
+```
+
+Plain `runs-on: self-hosted` also works, but in an org where Macs are registered
+by hand as well as by hangar it will pick whichever is free — the default
+`self-hosted, macOS, ARM64` labels describe the machine, not who manages it.
+Labels are fixed at registration, so a fleet that predates this needs one
+`make 0 && make <n>` to pick it up.
+
 First run fetches the runner release, and a Go toolchain too unless a matching one
 is already installed. Later runs build from cache.
 

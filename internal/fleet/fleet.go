@@ -17,6 +17,11 @@ import (
 	"github.com/specialistvlad/hangar/internal/config"
 )
 
+// hangarLabel is carried by every worker hangar registers. Workflows target it
+// to reach the fleet and nothing else; changing it strands every workflow that
+// already says `runs-on: [self-hosted, hangar]`.
+const hangarLabel = "hangar"
+
 // Fleet manages the set of runner workers described by a Config.
 type Fleet struct {
 	cfg *config.Config
@@ -187,10 +192,24 @@ func (f *Fleet) registerArgs(n int) []string {
 	if f.cfg.Group != "" {
 		args = append(args, "--runnergroup", f.cfg.Group)
 	}
-	if f.cfg.Labels != "" {
-		args = append(args, "--labels", f.cfg.Labels)
-	}
+	args = append(args, "--labels", labels(f.cfg.Labels))
 	return args
+}
+
+// labels is what a workflow targets with `runs-on: [self-hosted, hangar]`. The
+// runner's own defaults — self-hosted, macOS, ARM64 — describe the machine, not
+// who manages it, so in an org where Macs are registered by hand as well as by
+// hangar they cannot pick out the fleet. Applying it here rather than through
+// RUNNER_LABELS means the fleet is addressable on a stock install, and stays so
+// when an operator sets labels of their own.
+func labels(extra string) string {
+	out := []string{hangarLabel}
+	for _, l := range strings.Split(extra, ",") {
+		if l = strings.TrimSpace(l); l != "" && !strings.EqualFold(l, hangarLabel) {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 // deprovision stops, unregisters and deletes one worker.

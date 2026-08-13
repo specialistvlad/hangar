@@ -34,3 +34,34 @@ func TestRegisterArgsCarryNoToken(t *testing.T) {
 		t.Errorf("tokenEnv must hand the token to the runner out of band, got: %v", env)
 	}
 }
+
+// The default labels — self-hosted, macOS, ARM64 — say nothing about who runs
+// the runner, so an org with Macs from several sources cannot address the fleet.
+// The hangar label is what a workflow targets, so it must not depend on an
+// operator having filled in RUNNER_LABELS, and must survive one that is set.
+func TestRegisterArgsAlwaysLabelHangar(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels string
+		want   string
+	}{
+		{"unset", "", "hangar"},
+		{"extra labels are appended, not substituted", "gpu,xcode16", "hangar,gpu,xcode16"},
+		{"already named, not duplicated", "hangar", "hangar"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := New(&config.Config{Root: "/r", Org: "acme", NamePrefix: "mac-w", Labels: tc.labels})
+
+			args := f.registerArgs(1)
+			var got string
+			for i, a := range args {
+				if a == "--labels" && i+1 < len(args) {
+					got = args[i+1]
+				}
+			}
+			if got != tc.want {
+				t.Errorf("--labels = %q, want %q (argv: %s)", got, tc.want, strings.Join(args, " "))
+			}
+		})
+	}
+}
