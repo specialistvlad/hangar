@@ -17,7 +17,9 @@ func (r *Ring) Push(v float64) {
 	}
 }
 
-func (r *Ring) Values() []float64 { return r.vals }
+// Values copies the history out. The copy is the point: the sampler keeps
+// pushing from its own goroutine while a reader is drawing the previous frame.
+func (r *Ring) Values() []float64 { return append([]float64(nil), r.vals...) }
 
 var sparkChars = []rune("▁▂▃▄▅▆▇█")
 

@@ -24,7 +24,7 @@ func model(t *testing.T, n int) *Model {
 	m := New(fleet.New(&config.Config{
 		Root: root, NamePrefix: "test-w", Token: "t", Org: "o",
 	}))
-	m.refreshWorkers()
+	m.refreshWorkers(m.flt.List())
 	return m
 }
 
@@ -47,10 +47,10 @@ func TestPressesQueueOntoTarget(t *testing.T) {
 
 	// The pass that finishes reports the count it reached; the target moved past
 	// it, so the model must chase it rather than stop.
-	if cmd := m.scaleDone(scaleDoneMsg{reached: 2}); cmd == nil {
+	if cmd := m.scaleDone(scaleDoneMsg{reached: 2, fleet: m.flt.List()}); cmd == nil {
 		t.Fatal("a stale target should start another pass")
 	}
-	if cmd := m.scaleDone(scaleDoneMsg{reached: 4}); cmd != nil {
+	if cmd := m.scaleDone(scaleDoneMsg{reached: 4, fleet: m.flt.List()}); cmd != nil {
 		t.Fatal("reaching the target should stop")
 	}
 	if m.scaling {
@@ -62,7 +62,7 @@ func TestFailedPassReaimsAtReality(t *testing.T) {
 	m := model(t, 2)
 	m.scaleBy(1)
 
-	if cmd := m.scaleDone(scaleDoneMsg{reached: 3, err: fmt.Errorf("boom")}); cmd != nil {
+	if cmd := m.scaleDone(scaleDoneMsg{reached: 3, fleet: m.flt.List(), err: fmt.Errorf("boom")}); cmd != nil {
 		t.Fatal("a failed pass should not retry on its own")
 	}
 	if m.want != 2 {

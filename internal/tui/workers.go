@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/specialistvlad/hangar/internal/fleet"
 	"github.com/specialistvlad/hangar/internal/logs"
 )
 
@@ -34,13 +35,13 @@ func (m *Model) apply(e logs.Event) {
 	}
 }
 
-// refreshWorkers syncs the model against what is actually on disk, so a fleet
-// scaled from here or from another terminal shows up without restarting the
-// dashboard. Watchers are started and stopped from the same place, since a
-// worker appearing at any point after Init needs one just as much.
-func (m *Model) refreshWorkers() {
+// refreshWorkers applies a fleet listing, so a fleet scaled from here or from
+// another terminal shows up without restarting the dashboard. Watchers are
+// started and stopped from the same place, since a worker appearing at any
+// point after Init needs one just as much.
+func (m *Model) refreshWorkers(ws []fleet.Worker) {
 	seen := map[int]bool{}
-	for _, w := range m.flt.List() {
+	for _, w := range ws {
 		seen[w.Index] = true
 		st := m.workers[w.Index]
 		if st == nil {

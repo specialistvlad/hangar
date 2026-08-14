@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/specialistvlad/hangar/internal/config"
+	"github.com/specialistvlad/hangar/internal/fleet"
 )
 
 // Scaling from the dashboard runs the same reconcile `make N` runs, and it is
@@ -25,16 +26,13 @@ type scaleMsg string
 // target may have moved on while it ran.
 type scaleDoneMsg struct {
 	reached int
+	fleet   []fleet.Worker
 	err     error
-}
-
-func waitProgress(ch <-chan string) tea.Cmd {
-	return func() tea.Msg { return scaleMsg(<-ch) }
 }
 
 // scaleBy nudges the desired worker count by delta.
 func (m *Model) scaleBy(delta int) tea.Cmd {
-	have := len(m.flt.List())
+	have := len(m.workers) // the last listing; polling the disk here would block
 	base := have
 	if m.scaling {
 		base = m.want // stack presses onto the pending target, not onto the past
@@ -71,28 +69,32 @@ func (m *Model) startScale() tea.Cmd {
 
 	n, ch := m.want, m.progress
 	return func() tea.Msg {
+		// Called from every provisioning goroutine at once. Dropping a stale line
+		// beats blocking a reconcile on a screen that is not draining, e.g. after
+		// the dashboard has quit.
 		err := m.flt.Scale(n, func(line string) {
-			// Dropping a stale line beats blocking the reconcile on a screen that
-			// is not draining, e.g. after the dashboard has quit.
 			select {
-			case ch <- line:
+			case ch <- scaleMsg(line):
 			default:
 			}
 		})
-		return scaleDoneMsg{n, err}
+		// The pass has just changed the fleet; listing it here keeps that exec out
+		// of Update, where the poller's next tick would otherwise be the only way
+		// to learn what landed.
+		return scaleDoneMsg{n, m.flt.List(), err}
 	}
 }
 
 // scaleDone handles a finished pass and chases the target if it moved.
 func (m *Model) scaleDone(msg scaleDoneMsg) tea.Cmd {
 	m.scaling, m.note = false, ""
-	m.refreshWorkers()
+	m.refreshWorkers(msg.fleet)
 
 	if msg.err != nil {
 		// Re-aim at reality: a failed pass leaves the fleet wherever it got to,
 		// and the next keypress should count from there rather than from a target
 		// that was never reached.
-		m.want, m.scaleErr = len(m.flt.List()), msg.err.Error()
+		m.want, m.scaleErr = len(msg.fleet), msg.err.Error()
 		m.layout()
 		return nil
 	}

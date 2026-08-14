@@ -24,8 +24,6 @@ const (
 	sparkWidth = 24
 )
 
-type tickMsg time.Time
-
 type workerState struct {
 	Index      int
 	Name       string
@@ -43,16 +41,20 @@ type logLine struct {
 
 // Model is the bubbletea model backing the dashboard.
 type Model struct {
-	flt     *fleet.Fleet
-	sampler *metrics.Sampler
-	events  chan logs.Event
-	ctx     context.Context
-	cancel  context.CancelFunc
+	flt    *fleet.Fleet
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// Every input arrives on a channel filled by a goroutine; see bus.go.
+	events   chan logs.Event
+	fleetCh  chan fleetMsg
+	sampleCh chan sampleMsg
+	progress chan scaleMsg
 
 	workers  map[int]*workerState
 	watching map[int]context.CancelFunc
 	lines    []logLine
-	snap     metrics.Snapshot
+	frame    metrics.Frame
 
 	// want is the worker count the operator has asked for; scaling says whether
 	// a reconcile pass is chasing it right now, note is the step it is on and
@@ -62,7 +64,6 @@ type Model struct {
 	scaleSince time.Time
 	note       string
 	scaleErr   string
-	progress   chan string
 
 	focus     int // 0 shows every worker
 	follow    bool
@@ -82,9 +83,10 @@ func New(f *fleet.Fleet) *Model {
 
 	return &Model{
 		flt:      f,
-		sampler:  metrics.NewSampler(),
 		events:   make(chan logs.Event, 1024),
-		progress: make(chan string, 16),
+		fleetCh:  make(chan fleetMsg),
+		sampleCh: make(chan sampleMsg),
+		progress: make(chan scaleMsg, 16),
 		workers:  map[int]*workerState{},
 		watching: map[int]context.CancelFunc{},
 		follow:   true,
@@ -92,21 +94,16 @@ func New(f *fleet.Fleet) *Model {
 	}
 }
 
-// Init starts the log watchers and the metrics ticker.
+// Init starts the pollers that feed the dashboard and the commands that
+// consume them. Nothing here samples anything itself.
 func (m *Model) Init() tea.Cmd {
 	m.ctx, m.cancel = context.WithCancel(context.Background())
-	m.refreshWorkers()
-	return tea.Batch(tick(), waitFor(m.events), waitProgress(m.progress))
-}
 
-func tick() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
-}
+	sampler := metrics.NewSampler() // owned by its goroutine, touched nowhere else
+	go poll(m.ctx, m.fleetCh, func() fleetMsg { return fleetMsg(m.flt.List()) })
+	go poll(m.ctx, m.sampleCh, func() sampleMsg { return sampleMsg(sampler.Frame()) })
 
-// waitFor turns the log channel into a bubbletea command; it is re-issued after
-// every event so the stream keeps flowing without a second event loop.
-func waitFor(ch <-chan logs.Event) tea.Cmd {
-	return func() tea.Msg { return <-ch }
+	return tea.Batch(recv(m.events), recv(m.fleetCh), recv(m.sampleCh), recv(m.progress))
 }
 
 // Update handles one message.
@@ -117,18 +114,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		return m, nil
 
-	case tickMsg:
-		m.snap = m.sampler.Sample()
-		m.refreshWorkers()
-		return m, tick()
+	case fleetMsg:
+		m.refreshWorkers(msg)
+		return m, recv(m.fleetCh)
+
+	case sampleMsg:
+		m.frame = metrics.Frame(msg)
+		return m, recv(m.sampleCh)
 
 	case logs.Event:
 		m.apply(msg)
-		return m, waitFor(m.events)
+		return m, recv(m.events)
 
 	case scaleMsg:
 		m.note = string(msg)
-		return m, waitProgress(m.progress)
+		return m, recv(m.progress)
 
 	case scaleDoneMsg:
 		return m, m.scaleDone(msg)

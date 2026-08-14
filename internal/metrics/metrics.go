@@ -50,6 +50,26 @@ func NewSampler() *Sampler {
 	}
 }
 
+// Frame is one sample together with the history behind it. Sampling happens on
+// its own goroutine, so the renderer is handed the series rather than reaching
+// back into the Sampler's rings while they are being written.
+type Frame struct {
+	Snapshot
+	Load []float64
+	Mem  []float64
+	VM   []float64
+}
+
+// Frame samples and returns everything a dashboard needs to draw one row set.
+func (s *Sampler) Frame() Frame {
+	return Frame{
+		Snapshot: s.Sample(),
+		Load:     s.Load.Values(),
+		Mem:      s.Mem.Values(),
+		VM:       s.VM.Values(),
+	}
+}
+
 func (s *Sampler) Sample() Snapshot {
 	snap := Snapshot{NCPU: runtime.NumCPU(), MemTotal: s.memTotal}
 	snap.Load1 = loadAvg()

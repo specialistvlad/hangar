@@ -109,12 +109,12 @@ func (m *Model) headerLines() []string {
 		stDim.Render(fmt.Sprintf("%d workers", len(m.workers))) + target +
 		stDim.Render(fmt.Sprintf(" · %d busy · %s/%s", busy, cfg.Org, orDash(cfg.Group)))
 
-	s := m.snap
+	s := m.frame
 	host := fmt.Sprintf("%s  load %s %-5.2f   mem %s %s/%s   free %s",
 		stDim.Render("host  "),
-		metrics.Sparkline(m.sampler.Load.Values(), sparkWidth, float64(s.NCPU)),
+		metrics.Sparkline(m.frame.Load, sparkWidth, float64(s.NCPU)),
 		s.Load1,
-		metrics.Sparkline(m.sampler.Mem.Values(), sparkWidth, 100),
+		metrics.Sparkline(m.frame.Mem, sparkWidth, 100),
 		gib(s.MemUsed), gib(s.MemTotal),
 		diskStyle(s.DiskFree).Render(gib(s.DiskFree)),
 	)
@@ -123,7 +123,7 @@ func (m *Model) headerLines() []string {
 	if s.VMFound {
 		vm = fmt.Sprintf("%s  cpu  %s %-5.0f%%  mem %s",
 			stDim.Render("docker"),
-			metrics.Sparkline(m.sampler.VM.Values(), sparkWidth, float64(s.NCPU)*100),
+			metrics.Sparkline(m.frame.VM, sparkWidth, float64(s.NCPU)*100),
 			s.VMCPU, gib(s.VMMem))
 	}
 	return []string{title, host, vm}

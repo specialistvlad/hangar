@@ -97,6 +97,9 @@ func (f *Fleet) plan(n int) (add, drop []int) {
 // Scale reconciles the fleet to exactly n workers. It is a diff, not a rebuild:
 // running `scale 4` twice leaves the second run with nothing to do, and workers
 // that already exist are never torn down and recreated.
+//
+// Workers are provisioned in parallel, so progress may be called from several
+// goroutines at once.
 func (f *Fleet) Scale(n int, progress func(string)) error {
 	if n < 0 || n > config.MaxWorkers {
 		return fmt.Errorf("worker count must be 0-%d", config.MaxWorkers)
@@ -120,10 +123,14 @@ func (f *Fleet) Scale(n int, progress func(string)) error {
 		if err != nil {
 			return err
 		}
-		for _, i := range drop {
+		err = each(drop, func(i int) error {
 			if err := f.deprovision(i, token, progress); err != nil {
 				return fmt.Errorf("removing w%d: %w", i, err)
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
 	}
 	if len(add) == 0 {
@@ -138,12 +145,12 @@ func (f *Fleet) Scale(n int, progress func(string)) error {
 	if err != nil {
 		return err
 	}
-	for _, i := range add {
+	return each(add, func(i int) error {
 		if err := f.provision(i, tarball, token, progress); err != nil {
 			return fmt.Errorf("creating w%d: %w", i, err)
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // provision unpacks, registers and starts one worker.
