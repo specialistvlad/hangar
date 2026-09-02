@@ -68,8 +68,11 @@ COUNTS := $(shell seq 0 32)
 # `make <0-32>` — updates the runner, scales the fleet, then opens the dashboard.
 # Documented by hand in help: the target names are generated, so the usual
 # "target: ## description" convention cannot annotate them.
+#
+# `make 0` skips the update and the dashboard: a tear-down installs no runner,
+# so making it wait on a download is a network round trip that can only fail.
 $(COUNTS): $(BIN) $(ROOT)/.env
-	@$(BIN) update
+	@if [ "$@" != "0" ]; then $(BIN) update; fi
 	@$(BIN) scale $@
 	@if [ "$@" != "0" ]; then $(BIN) watch; fi
 

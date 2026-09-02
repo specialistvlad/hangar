@@ -175,7 +175,11 @@ Every GitHub call hangar makes, in full:
 | `POST /orgs/{org}/actions/runners/registration-token` | add a worker |
 | `POST /orgs/{org}/actions/runners/remove-token` | drop a worker |
 | `GET /orgs/{org}/actions/runners` | the `make status` preflight |
-| `GET /repos/actions/runner/releases/latest` | public — needs no auth |
+| `GET /repos/actions/runner/releases/latest` | public — sent without `GH_TOKEN` |
+
+The release lookup is called anonymously, so `make update` keeps working while
+the token is broken. `make 0` skips it for the same reason: tearing the fleet
+down installs nothing.
 
 You must be an owner/admin of the organization:
 
