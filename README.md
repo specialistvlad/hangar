@@ -191,6 +191,7 @@ gh api /user/memberships/orgs/YOUR-ORG --jq .role   # must print "admin"
 | `make watch` | Dashboard — scaling with `+`/`-` is the only thing it changes |
 | `make update` | Fetch the newest `actions/runner` release into `.cache/` |
 | `make status` | One-shot summary, no TUI |
+| `make kill` | Stop and delete every worker locally, without GitHub |
 | `make check` | vet + lint + file-length + tests, in parallel |
 | `make test` / `make lint` | Individually |
 | `make nuke` | Stop and delete every worker and all local state |
@@ -198,6 +199,20 @@ gh api /user/memberships/orgs/YOUR-ORG --jq .role   # must print "admin"
 **Quitting the dashboard never stops a runner.** hangar does not own the runner
 processes — launchd does — so `q` closes a viewer and nothing else. Stopping the
 fleet is always the explicit `make 0`.
+
+### `make kill` — stopping the fleet without a token
+
+`make 0` unregisters each worker server-side before deleting it, and that needs
+a removal token from GitHub. When `GH_TOKEN` has expired or was minted with the
+wrong scope, that call fails and the fleet keeps running with no way to stop it.
+
+`make kill` is the way out. It talks to nothing: it boots out each launchd
+agent, removes its plist, and deletes the worker directory — for every worker
+with a directory under `workers/`, a loaded `com.hangar.w<n>` agent, or both.
+
+What it trades away is the server side. The registrations stay, listed in the
+org as **offline**, until a working token exists or an operator deletes them in
+*Settings → Actions → Runners*. Prefer `make 0` whenever the token works.
 
 ## The dashboard
 
@@ -311,7 +326,8 @@ Everything lives in this directory:
 ```
 
 The single exception is `~/Library/LaunchAgents/com.hangar.w*.plist`, because that is
-the only location launchd loads login agents from. `make 0` removes them.
+the only location launchd loads login agents from. `make 0` and `make kill`
+remove them.
 
 Settings come from `.env` and nowhere else — the ambient environment is never
 consulted, so a fleet behaves the same from any shell, launchd session or cron job.

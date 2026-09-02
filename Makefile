@@ -61,7 +61,7 @@ export PATH        := $(GOROOT_DIR)/bin:$(PATH)
 
 COUNTS := $(shell seq 0 32)
 
-.PHONY: help build watch update status check check-file-length lint test vendor stats clean nuke $(COUNTS)
+.PHONY: help build watch update status kill check check-file-length lint test vendor stats clean nuke $(COUNTS)
 
 # ─── Fleet ────────────────────────────────────────────────────────────────────
 
@@ -81,6 +81,9 @@ update: $(BIN) $(ROOT)/.env ## Fetch the newest actions/runner release into .cac
 
 status: $(BIN) $(ROOT)/.env ## One-shot fleet summary, no TUI
 	@$(BIN) status
+
+kill: $(BIN) $(ROOT)/.env ## Stop and delete every worker locally, without GitHub
+	@$(BIN) kill
 
 # ─── Checks ───────────────────────────────────────────────────────────────────
 

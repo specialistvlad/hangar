@@ -21,11 +21,12 @@ import (
 const usage = `hangar — GitHub Actions runner fleet for one Mac
 
   hangar scale <0-32>   reconcile the fleet to N workers
+  hangar kill           stop and delete every worker locally, without GitHub
   hangar watch          live dashboard; +/- scales (quitting leaves runners running)
   hangar update         fetch the newest runner release
   hangar status         one-shot fleet summary
 
-Normally driven via the Makefile: make 4 · make watch · make 0`
+Normally driven via the Makefile: make 4 · make watch · make 0 · make kill`
 
 func main() {
 	// Docker executes docker-credential-<credsStore> from PATH. hangar symlinks
@@ -76,6 +77,18 @@ func run(args []string) error {
 			return err
 		}
 		return status(f)
+
+	case "kill":
+		// No RequireGitHub and no CheckAuth: a kill is what is left when the
+		// token is the thing that is broken, so it must never consult one.
+		n := f.Kill(logf)
+		if n == 0 {
+			logf("no workers to kill")
+			return nil
+		}
+		logf(fmt.Sprintf("killed %d worker(s) — still registered on GitHub as offline, "+
+			"remove them there once GH_TOKEN works", n))
+		return nil
 
 	case "update":
 		rel, err := f.LatestRelease()
