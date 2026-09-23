@@ -3,7 +3,8 @@
 [![check](https://github.com/specialistvlad/hangar/actions/workflows/check.yml/badge.svg)](https://github.com/specialistvlad/hangar/actions/workflows/check.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Run a fleet of GitHub Actions self-hosted runners on one Mac, with a live dashboard.
+Run a fleet of GitHub Actions self-hosted runners on one machine — a Mac or a Linux
+box — with a live dashboard.
 
 ```
 make 4       # scale to 4 runners, then watch them
@@ -11,8 +12,8 @@ make watch   # dashboard only
 make 0       # stop and unregister everything
 ```
 
-Built for the case where a Mac has far more capacity than one runner can use, and
-Kubernetes is not worth standing up to fix that.
+Built for the case where one machine has far more capacity than one runner can use,
+and Kubernetes is not worth standing up to fix that.
 
 ---
 
@@ -47,17 +48,18 @@ no wrapper scripts, no interception, nothing to keep in sync:
 ```
 HOME=<worker>/home
 TMPDIR=<worker>/tmp
-DOCKER_HOST=unix:///Users/you/.docker/run/docker.sock
+DOCKER_HOST=unix:///Users/you/.docker/run/docker.sock    # or /var/run/docker.sock on Linux
 ```
 
 ### Why not actions-runner-controller?
 
 [ARC](https://github.com/actions/actions-runner-controller) is the right answer when
 you have a Kubernetes cluster and want runners that scale to zero on Linux. It is a
-poor fit for the case this exists for — getting more out of one Mac you already own:
+poor fit for the case this exists for — getting more out of one machine you already
+own:
 
 - **It needs a cluster.** ARC is a Kubernetes controller. If standing one up is the
-  price of running four runners on a Mac already sitting on your desk, the cure
+  price of running four runners on a machine already sitting on your desk, the cure
   costs more than the disease.
 - **Docker is not there by default.** Runner pods have no daemon unless you set
   `containerMode` to `dind` or `kubernetes`. The dind sidecar
@@ -78,19 +80,22 @@ this.
 
 ## Requirements
 
-- **macOS on Apple Silicon.** launchd agents and `ps`/`vm_stat`/`sysctl` parsing make
-  this genuinely darwin/arm64-only, not merely untested elsewhere.
+- **macOS or Linux.** On macOS, launchd supervises the workers and Docker Desktop
+  runs the builds. On Linux, the user's systemd manager supervises them and the
+  system docker daemon runs the builds — see [Running on Linux](#running-on-linux)
+  for the one-time setup. Anything else has no supervisor and does not build.
 - **A GitHub token that can manage the org's runners** — see below.
-- Nothing else. If a matching Go is already installed hangar uses it; otherwise it
-  downloads a private one into `.toolchain/`, so a machine with no Go can still
-  build. Either way nothing is written to `~/go` or `~/Library/Caches`.
+- `make`, `curl`, `tar` and `git`. If a matching Go is already installed hangar uses
+  it; otherwise it downloads a private one into `.toolchain/`, so a machine with no
+  Go can still build. Either way nothing is written to `~/go` or the user's cache
+  directory.
 
 ## Setup
 
 ```bash
 git clone https://github.com/specialistvlad/hangar.git
 cd hangar
-make            # prints help, creates .env from the template on first run
+make status     # first run creates .env from the template and stops
 $EDITOR .env    # GH_TOKEN and GH_ORG are required
 make 4
 ```
@@ -105,9 +110,11 @@ Send a job to the fleet with the `hangar` label, which every worker registers wi
 runs-on: [self-hosted, hangar]
 ```
 
-Plain `runs-on: self-hosted` also works, but in an org where Macs are registered
-by hand as well as by hangar it will pick whichever is free — the default
-`self-hosted, macOS, ARM64` labels describe the machine, not who manages it.
+Plain `runs-on: self-hosted` also works, but in an org where machines are
+registered by hand as well as by hangar it will pick whichever is free — the
+default labels, such as `self-hosted, macOS, ARM64` or `self-hosted, Linux, X64`,
+describe the machine, not who manages it. Add `Linux` or `macOS` to `runs-on` to
+pick a platform when the org has hangar fleets on both.
 Labels are fixed at registration, so a fleet that predates this needs one
 `make 0 && make <n>` to pick it up.
 
@@ -117,6 +124,98 @@ is already installed. Later runs build from cache.
 Build state lives in `.gopath/`, `.gocache/` and `.toolchain/` and can reach a
 couple of GB — the usual Go caches, relocated here rather than added. `make clean`
 reclaims all of it.
+
+## Running on Linux
+
+Workers are systemd **user** units, run by the user's own service manager: no root,
+no system units. Linux hosts need cgroup v2, which every current distribution
+defaults to; on an older v1 host the fleet runs but the dashboard cannot sample
+docker. Two things have to be true first, and both need root once:
+
+```bash
+sudo usermod -aG docker "$USER"                  # reach the docker daemon
+sudo loginctl enable-linger "$USER"              # start at boot, survive logout
+sudo systemctl restart "user@$(id -u).service"   # only if you were already logged in
+```
+
+Without lingering the user's manager — and every worker with it — stops at the last
+logout and never starts at boot, which looks like a fleet that works only while
+someone is watching it.
+
+The restart matters because a running manager keeps the groups it started with, and
+every worker inherits them. A manager that was already up when `usermod` ran never
+gains `docker` — and once lingering is on, logging out and back in does not restart
+it. The restart stops only that user's services, not the shell you are in; a reboot
+works too. `make <n>` checks both — lingering, and that the manager can open the
+docker socket — and refuses to scale until they hold.
+
+The runner itself needs the ICU library. Most distributions ship it; if registration
+complains, install it as an administrator — the fleet's own account has no sudo — then
+run `make <n>` again as the fleet's account. A worker that failed to register has
+already been removed, so the retry starts clean. The runner's installer, taken from
+the cached release, picks the right package for the distribution:
+
+```bash
+d=$(mktemp -d) && sudo tar xzf "$(sudo sh -c 'ls -t /srv/hangar/hangar/.cache/actions-runner-linux-*.tar.gz | head -1')" \
+  -C "$d" ./bin/installdependencies.sh && sudo "$d/bin/installdependencies.sh"; sudo rm -rf "$d"
+```
+
+A dedicated account keeps the fleet away from everyone else's home, and a job's
+reach down to what that account can touch. Make it a regular account rather than a
+`--system` one: journald keeps per-user journals only for regular users, so
+`journalctl --user` shows nothing for a system account.
+
+```bash
+sudo useradd --create-home --home-dir /srv/hangar --shell /bin/bash --groups docker hangar
+sudo loginctl enable-linger hangar
+sudo -iu hangar
+git clone https://github.com/specialistvlad/hangar.git && cd hangar
+make status     # first run creates .env from the template
+$EDITOR .env
+make 4
+```
+
+Operate it the same way afterwards — `sudo -iu hangar`, then `cd hangar && make watch`.
+hangar talks to the systemd manager itself, so the session `sudo -i` opens is
+enough; `systemctl --user` by hand needs `XDG_RUNTIME_DIR=/run/user/$(id -u)` set
+in that shell.
+
+Membership in `docker` is root-equivalent on the host, as it is for any self-hosted
+runner that builds images. See [SECURITY.md](SECURITY.md).
+
+Each worker's unit is `hangar-w<n>.service`:
+
+```bash
+systemctl --user status hangar-w1        # state, main pid, restarts and exit codes
+journalctl --user -u hangar-w1           # start/stop history
+tail -f logs/w1.out logs/w1.err          # the runner's own output
+```
+
+The runner writes its output to `logs/w<n>.out` and `logs/w<n>.err`, as on macOS,
+not to the journal.
+
+**Files a container wrote as root.** A job that bind-mounts part of its worker into a
+container — `docker run -v "$GITHUB_WORKSPACE:/app" …`, or its `$HOME` or `$TMPDIR` —
+leaves files owned by root, which the fleet's account cannot delete. Scaling down then
+stops at that worker and prints the command that clears it through docker, which the
+account can reach; run it and scale again. For worker 3:
+
+```bash
+docker run --rm -v "$PWD/workers:/w" alpine rm -rf /w/w3
+```
+
+**`WORKER_TMP_ROOT`** in `.env` moves every worker's `TMPDIR` to `<root>/w<n>`, for
+example onto a size-capped tmpfs so build scratch never reaches the disk. Before every
+start, on both platforms, each worker recreates its directory — so a reboot that
+empties the tmpfs does no harm — and refuses to start unless both `<root>/w<n>` and the
+root itself belong to the fleet's account and are not symlinks: whoever owns the root
+could swap a worker's directory, and the scripts jobs write there, under a running
+build. hangar also refuses a root anywhere under a directory every account can write
+to — `/tmp`, `/var/tmp`, `/dev/shm` — because the system's tmp cleaner sweeps those
+while workers run, and anyone could recreate what it removed. Use a dedicated mount or
+directory. hangar deletes `<root>/w<n>` when the worker goes. On the host this was built
+for, fstab mounts it as
+`tmpfs /srv/hangar/tmp tmpfs size=32G,mode=0700,uid=<hangar>,gid=<hangar>,nosuid,nodev 0 0`.
 
 ## Getting a token
 
@@ -196,12 +295,13 @@ gh api /user/memberships/orgs/YOUR-ORG --jq .role   # must print "admin"
 | `make update` | Fetch the newest `actions/runner` release into `.cache/` |
 | `make status` | One-shot summary, no TUI |
 | `make kill` | Stop and delete every worker locally, without GitHub |
+| `make metrics` / `make metrics-stop` | Run / remove the Prometheus exporter as a service |
 | `make check` | vet + lint + file-length + tests, in parallel |
 | `make test` / `make lint` | Individually |
 | `make nuke` | Stop and delete every worker and all local state |
 
 **Quitting the dashboard never stops a runner.** hangar does not own the runner
-processes — launchd does — so `q` closes a viewer and nothing else. Stopping the
+processes — launchd or systemd does — so `q` closes a viewer and nothing else. Stopping the
 fleet is always the explicit `make 0`.
 
 ### `make kill` — stopping the fleet without a token
@@ -210,13 +310,45 @@ fleet is always the explicit `make 0`.
 a removal token from GitHub. When `GH_TOKEN` has expired or was minted with the
 wrong scope, that call fails and the fleet keeps running with no way to stop it.
 
-`make kill` is the way out. It talks to nothing: it boots out each launchd
-agent, removes its plist, and deletes the worker directory — for every worker
-with a directory under `workers/`, a loaded `com.hangar.w<n>` agent, or both.
+`make kill` is the way out. It talks to nothing GitHub-side: it stops each
+worker's service, removes its definition, and deletes the worker directory — for
+every worker with a directory under `workers/`, a service the supervisor still
+knows (a `com.hangar.w<n>` launchd agent, or a `hangar-w<n>.service` systemd
+unit), or both.
 
 What it trades away is the server side. The registrations stay, listed in the
 org as **offline**, until a working token exists or an operator deletes them in
 *Settings → Actions → Runners*. Prefer `make 0` whenever the token works.
+
+## Metrics
+
+`make metrics` runs `hangar serve` as one more supervised service next to the workers —
+`hangar-metrics.service` on Linux, the `com.hangar.metrics` agent on macOS — enabled
+for boot and restarted if it dies. It answers Prometheus scrapes at
+`http://127.0.0.1:9151/metrics` (`METRICS_ADDR` in `.env`; loopback by default,
+since the metrics name repositories and jobs). `make status` shows whether it is up.
+Re-run `make metrics` after rebuilding hangar to restart it on the new binary.
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `hangar_worker_up` | `worker`, `runner` | 1 while the runner is registered and its listener runs |
+| `hangar_worker_busy` | `worker`, `runner` | 1 while a job runs |
+| `hangar_worker_job_info` | + `job_name`, `workflow`, `repo`, `run_id` | 1, only while busy |
+| `hangar_worker_job_start_timestamp_seconds` | `worker`, `runner` | current job's start; absent while idle |
+| `hangar_worker_last_job_end_timestamp_seconds` | `worker`, `runner` | when the last job ended |
+| `hangar_jobs_total` | `worker`, `runner`, `result` | jobs finished: `succeeded`, `failed`, `canceled` |
+| `hangar_job_duration_seconds` | `result` | histogram, 30 s to 2 h |
+| `hangar_workers_configured` | | workers on this machine |
+| `hangar_build_info` | `version`, `commit` | 1 |
+
+Everything comes from what hangar already reads: the supervisor's view of the
+workers, polled every 5 s, and the runner's own `_diag` logs — job starts and ends
+from `Runner_*.log`, with the runner's timestamps, and each job's repository,
+workflow and run id from the job message in its `Worker_*.log`. No GitHub access is
+needed. Counters count from the moment the exporter started; after a restart it
+restores what is running from the logs but does not count finished jobs again, so
+query them with `rate()` or `increase()`. The text format is written without a client
+library — hangar adds no dependency a page of stdlib covers.
 
 ## The dashboard
 
@@ -252,10 +384,22 @@ forces it.
 `1`–`9` focus one worker, `a` returns to all, `f` toggles follow, `/` filters,
 scrolling up pauses follow automatically.
 
-Docker's VM gets its own row because that is where build CPU actually lands — the
-runner processes themselves sit near idle while BuildKit does the work. Free disk
-turns amber below 80GB and red below 30GB, which is roughly where parallel image
-builds start dying on ENOSPC.
+Docker gets its own row because that is where build CPU actually lands — the
+runner processes themselves sit near idle while BuildKit does the work. On macOS
+the row is Docker Desktop's virtual machine; on Linux it is the sum of the docker
+daemon, containerd, every container and every BuildKit build step, read from their
+cgroups, or `n/a` on a host without cgroup v2.
+
+Free disk shows the filesystem closest to running out among those a build writes to,
+labeled with which one it is: the workers directory, `WORKER_TMP_ROOT` when set, and on
+macOS the home volume holding Docker Desktop's disk image, on Linux docker's data root
+and — when docker uses the containerd image store — containerd's root. Each is judged
+against its own size: amber under a quarter free, red under a tenth, capped at 80GB and
+30GB, which is roughly where parallel image builds start dying on ENOSPC. So a small
+tmpfs reads fine while empty and does not hide a large volume that is filling. On Linux
+a directory under an ext4 or XFS project quota reports its quota rather than the whole
+disk — provided the directory carries the project-inherit flag (`chattr +P`); otherwise
+statfs reports the whole filesystem.
 
 ## How it works
 
@@ -263,16 +407,18 @@ builds start dying on ENOSPC.
 make N ──> update ──> scale ──> watch          watch is a READER, except for
               │        ▲ │         │           +/-, which re-enters scale
               │        └─│─── +/- ─┘
-              ▼          ▼         ▼           tails files, samples ps
-          .cache/    launchd    _diag/*.log    Ctrl-C kills only the TUI
-          tarball    plists     (runner writes these itself)
+              ▼          ▼         ▼           tails files, samples the host
+          .cache/    launchd /  _diag/*.log    Ctrl-C kills only the TUI
+          tarball    systemd    (runner writes these itself)
 ```
 
 There is no supervisor daemon and no log shipping, because neither is needed:
 
-- **launchd supervises.** One agent per worker, with `KeepAlive` for crash restart
-  and `RunAtLoad` for reboot survival. This is also what makes "exit watch ≠ kill
-  runners" fall out for free rather than needing a daemon.
+- **The OS supervises.** One launchd agent per worker on macOS, with `KeepAlive`
+  for crash restart and `RunAtLoad` for reboot survival; one systemd user unit per
+  worker on Linux, with `Restart=always` and an enable into `default.target`. This
+  is also what makes "exit watch ≠ kill runners" fall out for free rather than
+  needing a daemon.
 - **The runner already writes the logs.** `_diag/Runner_*.log` carries job state
   transitions; `_diag/pages/*.log` carries live console output, BuildKit lines
   included. The dashboard tails those two files.
@@ -294,13 +440,17 @@ Two things a private `HOME` cannot cover, both handled during provisioning:
   enough: with `credsStore` unset the Docker CLI falls back to a platform default,
   which on macOS is `docker-credential-osxkeychain` — and a keychain write from a
   launchd agent raises a SecurityAgent dialog nobody can click, so every
-  `docker login` blocks forever. hangar therefore ships its own credential helper
-  and names it explicitly, which removes the fallback. Credentials land in a plain
-  file under the worker's own `HOME`.
+  `docker login` blocks forever. On Linux the default is `pass` or the desktop
+  secret service, which a headless service has neither of. hangar therefore ships
+  its own credential helper and names it explicitly, which removes the fallback.
+  Credentials land in a plain file under the worker's own `HOME`.
 - **Docker resolves CLI plugins and contexts under `$HOME/.docker`.** A fresh home
-  has neither, so `~/.docker/cli-plugins` is symlinked in (or `docker buildx build`
-  fails with *unknown command*), and `DOCKER_HOST` is set explicitly (or the socket
-  falls back to `/var/run/docker.sock`, which Docker Desktop never creates).
+  has neither. When the real home has `~/.docker/cli-plugins` — Docker Desktop keeps
+  buildx and compose there — it is symlinked in, or `docker buildx build` fails with
+  *unknown command*. Otherwise, as on a Linux host with system-wide plugins, the worker
+  gets a private, writable, empty one, and the CLI finds the system's plugins as usual.
+  `DOCKER_HOST` is set explicitly, or the socket falls back to `/var/run/docker.sock`,
+  which Docker Desktop never creates.
 
 ### Where credentials actually live
 
@@ -314,8 +464,8 @@ is on disk:
 | cloud credentials | `RUNNER_TEMP`, cleared per job | one job |
 | `GH_TOKEN` | `.env`, mode 0600 | until revoked |
 
-The RSA key is plaintext because that is how GitHub's runner stores it on macOS —
-only Windows gets DPAPI. It is the same on a hand-installed runner. `GH_TOKEN` is
+The RSA key is plaintext because that is how GitHub's runner stores it on macOS and
+Linux — only Windows gets DPAPI. It is the same on a hand-installed runner. `GH_TOKEN` is
 the one long-lived secret hangar itself chooses the storage for.
 
 ## Self-containment
@@ -325,16 +475,19 @@ Everything lives in this directory:
 ```
 .toolchain/go/   pinned Go SDK           .cache/     runner tarballs
 .gopath/         GOPATH + module cache   workers/    runner installs
-.gocache/        build cache             logs/       launchd stdout/stderr
+.gocache/        build cache             logs/       worker stdout/stderr
 .bin/            hangar, golangci-lint, gotestsum
 ```
 
-The single exception is `~/Library/LaunchAgents/com.hangar.w*.plist`, because that is
-the only location launchd loads login agents from. `make 0` and `make kill`
-remove them.
+There are two exceptions. The first is where the service manager loads workers
+from: `~/Library/LaunchAgents/com.hangar.w*.plist` on macOS, because that is the only
+location launchd loads login agents from, and `~/.config/systemd/user/hangar-w*.service`
+on Linux, for the same reason. The second is opt-in: with `WORKER_TMP_ROOT` set, each
+worker's `TMPDIR` lives at `<WORKER_TMP_ROOT>/w<n>`. `make 0` and `make kill` remove
+both.
 
 Settings come from `.env` and nowhere else — the ambient environment is never
-consulted, so a fleet behaves the same from any shell, launchd session or cron job.
+consulted, so a fleet behaves the same from any shell, service manager or cron job.
 
 ## Migrating from a hand-installed runner
 
@@ -344,7 +497,7 @@ exactly the conflict this exists to remove. Retire it first:
 
 ```bash
 cd /path/to/old/actions-runner
-./svc.sh stop && ./svc.sh uninstall
+./svc.sh stop && ./svc.sh uninstall      # sudo ./svc.sh … on Linux
 ./config.sh remove --token <removal-token>
 ```
 
@@ -353,7 +506,8 @@ cd /path/to/old/actions-runner
 `make check` runs `go vet`, `golangci-lint`, a 250-line-per-file limit and the unit
 tests in parallel, then prints a summary. Lint and test binaries are installed into
 `.bin/` from this repo's own module cache, so checks never depend on a
-brew-installed tool. CI runs the same target on `macos-latest`.
+system-installed tool. CI runs the same target on `macos-latest` and
+`ubuntu-latest`, since each platform's supervisor and metrics only compile there.
 
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). For anything
 security-sensitive, [SECURITY.md](SECURITY.md) covers private reporting and the

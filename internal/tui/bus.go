@@ -11,9 +11,9 @@ import (
 )
 
 // Nothing expensive may run inside Update. Listing the fleet shells out to
-// launchctl and sampling the host runs ps, vm_stat and sysctl — a keypress
-// arriving during one of those used to wait behind it, which is what made
-// scaling feel like it had frozen the dashboard.
+// launchctl or systemctl, and sampling a Mac runs ps, vm_stat and sysctl — a
+// keypress arriving during one of those used to wait behind it, which is what
+// made scaling feel like it had frozen the dashboard.
 //
 // So every source of state is a goroutine on the far side of a channel, and
 // Update does nothing but consume messages: log lines, scale progress, fleet

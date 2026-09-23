@@ -5,9 +5,13 @@ merged is to keep it that way.
 
 ## Before you start
 
-hangar is **macOS on Apple Silicon only**, and not incidentally: launchd agents,
-the `ps`/`vm_stat`/`sysctl` parsing, and Docker Desktop's socket layout are all
-darwin/arm64 specifics. Ports to Linux or Intel are not small changes, so please
+hangar runs on **macOS and Linux**. The platform-specific parts are split by build
+tag and kept small: the supervisor (`internal/fleet/launchd.go` for launchd,
+`systemd.go` and `systemd_unit.go` for systemd) and the host sampling
+(`internal/metrics/metrics_darwin.go`, `metrics_linux.go`). Everything else —
+isolation, registration, the credential helper, the TUI, log tailing — is shared.
+A change to one platform's file usually wants the matching change in the other.
+Support for another operating system needs a supervisor of its own, so please
 open an issue before writing one.
 
 You need a GitHub organization you own to exercise anything that registers a
@@ -25,13 +29,15 @@ make check      # vet + lint + file-length + tests
 
 Everything builds into the repo: its own Go toolchain (if yours does not match
 the pin), its own module cache, its own lint and test binaries. Nothing is
-written to `~/go` or `~/Library/Caches`. `make clean` reclaims all of it.
+written to `~/go` or the user's cache directory. `make clean` reclaims all of it.
 
 ## The bar for a change
 
 `make check` must pass. It runs `go vet`, `golangci-lint`, the unit tests, and a
 **250-line-per-file limit** on non-test sources. CI runs the same target on
-`macos-latest`, so a green local run is a green PR.
+`macos-latest` and `ubuntu-latest`. A local run only compiles your own platform's
+files, so for a change to shared code also run
+`GOOS=linux go vet ./...` from a Mac, or `GOOS=darwin go vet ./...` from Linux.
 
 A few conventions the existing code follows, worth matching:
 
@@ -43,7 +49,7 @@ A few conventions the existing code follows, worth matching:
   and commit the `vendor/` result.
 - **Settings come from `.env` and nowhere else.** The ambient environment is
   deliberately never consulted, so a fleet behaves identically from any shell,
-  launchd session or cron job. Please do not add `os.Getenv` calls.
+  service manager or cron job. Please do not add `os.Getenv` calls.
 - **Non-trivial logic gets a test.** Nothing elaborate — the existing tests are
   plain table tests with no framework.
 
@@ -56,9 +62,10 @@ mismatch there is treated as a bug in its own right.
 
 ## Reporting bugs
 
-Include your macOS version, whether Docker Desktop is running, and the relevant
-output from `logs/wN.err` or `workers/wN/_diag/`. **Scrub tokens before
-pasting** — `_diag` logs and `.env` both contain credentials.
+Include your OS and version, how docker is running (Docker Desktop or a system
+daemon), and the relevant output from `logs/wN.err` or `workers/wN/_diag/` — on
+Linux also `systemctl --user status hangar-wN`. **Scrub tokens before pasting** —
+`_diag` logs and `.env` both contain credentials.
 
 ## Conduct
 

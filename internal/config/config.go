@@ -9,8 +9,10 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -31,7 +33,16 @@ type Config struct {
 	// worker's private one. Isolation is the default; this is the opt-out, and
 	// it stays short because sharing is the exception.
 	SharePaths []string // SHARE_PATHS
+	// TmpRoot, when set, holds each worker's TMPDIR as <TmpRoot>/wN instead of
+	// inside the worker directory — meant for a size-capped tmpfs.
+	TmpRoot string // WORKER_TMP_ROOT
+	// MetricsAddr is where `hangar serve` answers /metrics.
+	MetricsAddr string // METRICS_ADDR
 }
+
+// defaultMetricsAddr is loopback only: the metrics name repositories and jobs,
+// which have no business on the network unless an operator decides so.
+const defaultMetricsAddr = "127.0.0.1:9151"
 
 func (c *Config) WorkersDir() string { return filepath.Join(c.Root, "workers") }
 func (c *Config) LogsDir() string    { return filepath.Join(c.Root, "logs") }
@@ -44,10 +55,6 @@ func (c *Config) WorkerDir(n int) string {
 
 func (c *Config) WorkerName(n int) string { return fmt.Sprintf("%s%d", c.NamePrefix, n) }
 
-// Label is the launchd job label for worker n. Namespaced under com.hangar so
-// it can never collide with a runner installed by the vendor's own svc.sh.
-func (c *Config) Label(n int) string { return fmt.Sprintf("com.hangar.w%d", n) }
-
 // Load reads .env from root. Missing optional keys fall back to a default;
 // missing required keys are reported together rather than one per run.
 func Load(root string) (*Config, error) {
@@ -59,20 +66,43 @@ func Load(root string) (*Config, error) {
 	host, _ := os.Hostname()
 	host = strings.ToLower(strings.TrimSuffix(host, ".local"))
 	if host == "" {
-		host = "mac"
+		host = "hangar"
+	}
+	// Checked here rather than when a worker is built: by then the worker is
+	// already registered on GitHub, and a bad entry would strand it.
+	var shares []string
+	for _, raw := range splitList(env["SHARE_PATHS"]) {
+		rel, err := cleanSharePath(raw)
+		if err != nil {
+			return nil, err
+		}
+		shares = append(shares, rel)
+	}
+	metricsAddr := or(env["METRICS_ADDR"], defaultMetricsAddr)
+	if _, _, err := net.SplitHostPort(metricsAddr); err != nil {
+		return nil, fmt.Errorf("METRICS_ADDR must be host:port, got %q", metricsAddr)
+	}
+	tmpRoot := env["WORKER_TMP_ROOT"]
+	if tmpRoot != "" {
+		if !filepath.IsAbs(tmpRoot) {
+			return nil, fmt.Errorf("WORKER_TMP_ROOT must be an absolute path, got %q", tmpRoot)
+		}
+		tmpRoot = filepath.Clean(tmpRoot)
 	}
 
 	c := &Config{
-		Root:       root,
-		Token:      env["GH_TOKEN"],
-		Org:        env["GH_ORG"],
-		Group:      env["RUNNER_GROUP"],
-		Labels:     env["RUNNER_LABELS"],
-		NamePrefix: or(env["RUNNER_NAME_PREFIX"], host+"-w"),
-		DockerHost: env["DOCKER_HOST"],
-		RunnerPath: env["RUNNER_PATH"],
-		Lang:       or(env["RUNNER_LANG"], "en_US.UTF-8"),
-		SharePaths: splitList(env["SHARE_PATHS"]),
+		Root:        root,
+		Token:       env["GH_TOKEN"],
+		Org:         env["GH_ORG"],
+		Group:       env["RUNNER_GROUP"],
+		Labels:      env["RUNNER_LABELS"],
+		NamePrefix:  or(env["RUNNER_NAME_PREFIX"], host+"-w"),
+		DockerHost:  env["DOCKER_HOST"],
+		RunnerPath:  env["RUNNER_PATH"],
+		Lang:        or(env["RUNNER_LANG"], defaultLang(runtime.GOOS)),
+		SharePaths:  shares,
+		TmpRoot:     tmpRoot,
+		MetricsAddr: metricsAddr,
 	}
 	if c.DockerHost == "" {
 		c.DockerHost = detectDockerHost()
@@ -161,20 +191,35 @@ func parseEnvFile(path string) (map[string]string, error) {
 	return env, sc.Err()
 }
 
-// detectDockerHost finds Docker Desktop's socket. A worker with a private HOME
-// has no docker contexts to resolve the daemon from, and Docker Desktop does
-// not create /var/run/docker.sock, so an unset DOCKER_HOST would break every
-// docker step with a confusing "cannot connect" rather than a clear error.
+// defaultLang is the locale jobs get when RUNNER_LANG is unset. macOS always
+// ships en_US.UTF-8; a minimal Linux install often has nothing but C.UTF-8,
+// and a LANG naming a locale that is not generated makes every shell and perl
+// in a job print setlocale warnings.
+func defaultLang(goos string) string {
+	if goos == "darwin" {
+		return "en_US.UTF-8"
+	}
+	return "C.UTF-8"
+}
+
+// detectDockerHost finds the daemon socket. A worker with a private HOME has no
+// docker contexts to resolve the daemon from, and Docker Desktop does not
+// create /var/run/docker.sock, so an unset DOCKER_HOST would break every docker
+// step with a confusing "cannot connect" rather than a clear error. Docker
+// Desktop's socket wins when it exists; otherwise the system socket a Linux
+// daemon listens on is named outright.
 func detectDockerHost() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	var candidates []string
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".docker", "run", "docker.sock"))
 	}
-	sock := filepath.Join(home, ".docker", "run", "docker.sock")
-	if _, err := os.Stat(sock); err != nil {
-		return ""
+	candidates = append(candidates, "/var/run/docker.sock")
+	for _, sock := range candidates {
+		if _, err := os.Stat(sock); err == nil {
+			return "unix://" + sock
+		}
 	}
-	return "unix://" + sock
+	return ""
 }
 
 // splitList parses a comma-separated setting, dropping empty entries.

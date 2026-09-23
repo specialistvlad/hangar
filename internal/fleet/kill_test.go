@@ -7,29 +7,31 @@ import (
 
 // A force-kill exists for the case where GitHub cannot be reached at all, so it
 // must not depend on the two sides of the fleet agreeing. A worker directory
-// with no agent, and an agent whose directory was already deleted, are both
+// with no service, and a service whose directory was already deleted, are both
 // leftovers a scale-down would have cleaned up, and both have to be torn down.
-func TestKillTargetsCoverDisksAndAgents(t *testing.T) {
+// Which services hangar owns is decided by each platform's parser, tested
+// alongside it.
+func TestKillTargetsCoverDisksAndServices(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		disk   []Worker
-		loaded map[string]int
+		loaded map[int]int
 		want   []int
 	}{
 		{
 			name:   "matched pairs are targeted once each",
 			disk:   []Worker{{Index: 1}, {Index: 2}},
-			loaded: map[string]int{"com.hangar.w1": 100, "com.hangar.w2": 101},
+			loaded: map[int]int{1: 100, 2: 101},
 			want:   []int{1, 2},
 		},
 		{
-			name:   "an agent whose directory is gone is still booted out",
+			name:   "a service whose directory is gone is still stopped",
 			disk:   nil,
-			loaded: map[string]int{"com.hangar.w3": 102},
+			loaded: map[int]int{3: 102},
 			want:   []int{3},
 		},
 		{
-			name:   "a directory with no agent is still deleted",
+			name:   "a directory with no service is still deleted",
 			disk:   []Worker{{Index: 4}},
 			loaded: nil,
 			want:   []int{4},
@@ -37,13 +39,13 @@ func TestKillTargetsCoverDisksAndAgents(t *testing.T) {
 		{
 			name:   "targets come back in ascending order",
 			disk:   []Worker{{Index: 10}, {Index: 2}},
-			loaded: map[string]int{"com.hangar.w1": 0},
+			loaded: map[int]int{1: 0},
 			want:   []int{1, 2, 10},
 		},
 		{
-			name:   "jobs hangar does not own are left alone",
+			name:   "nothing on either side means nothing to kill",
 			disk:   nil,
-			loaded: map[string]int{"com.apple.Finder": 1, "com.hangar.watchdog": 2},
+			loaded: map[int]int{},
 			want:   nil,
 		},
 	} {

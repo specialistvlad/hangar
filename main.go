@@ -1,32 +1,45 @@
 // Command hangar manages a fleet of GitHub Actions self-hosted runners on a
-// single Mac, giving each one isolated credential state while they share the
-// docker daemon and its build cache.
+// single machine — a Mac or a Linux host — giving each one isolated credential
+// state while they share the docker daemon and its build cache.
 //
 // It is normally driven through the Makefile rather than invoked directly.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/specialistvlad/hangar/internal/config"
 	"github.com/specialistvlad/hangar/internal/credhelper"
+	"github.com/specialistvlad/hangar/internal/exporter"
 	"github.com/specialistvlad/hangar/internal/fleet"
 	"github.com/specialistvlad/hangar/internal/tui"
 )
 
-const usage = `hangar — GitHub Actions runner fleet for one Mac
+const usage = `hangar — GitHub Actions runner fleet for one machine
 
   hangar scale <0-32>   reconcile the fleet to N workers
   hangar kill           stop and delete every worker locally, without GitHub
   hangar watch          live dashboard; +/- scales (quitting leaves runners running)
   hangar update         fetch the newest runner release
   hangar status         one-shot fleet summary
+  hangar serve          Prometheus metrics on METRICS_ADDR (foreground)
+  hangar metrics start  run serve as a service, restarted on the current binary
+  hangar metrics stop   stop and remove that service
 
-Normally driven via the Makefile: make 4 · make watch · make 0 · make kill`
+Normally driven via the Makefile: make 4 · make watch · make 0 · make kill · make metrics`
+
+// Set by the Makefile from git; reported by hangar_build_info.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
 
 func main() {
 	// Docker executes docker-credential-<credsStore> from PATH. hangar symlinks
@@ -110,6 +123,16 @@ func run(args []string) error {
 	case "status":
 		return status(f)
 
+	case "serve":
+		// Stops cleanly on the SIGTERM a service manager sends.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		logf(fmt.Sprintf("serving metrics on http://%s/metrics", cfg.MetricsAddr))
+		return exporter.Serve(ctx, f, cfg.MetricsAddr, version, commit)
+
+	case "metrics":
+		return metrics(f, args[1:])
+
 	case "-h", "--help", "help":
 		fmt.Println(usage)
 		return nil
@@ -117,11 +140,36 @@ func run(args []string) error {
 	return fmt.Errorf("unknown command %q\n\n%s", args[0], usage)
 }
 
+// metrics starts or stops the exporter's service.
+func metrics(f *fleet.Fleet, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("metrics needs start or stop, e.g. `hangar metrics start`")
+	}
+	switch args[0] {
+	case "start":
+		if err := f.StartMetrics(); err != nil {
+			return err
+		}
+		logf(fmt.Sprintf("metrics exporter running: http://%s/metrics", f.Config().MetricsAddr))
+		return nil
+	case "stop":
+		f.StopMetrics()
+		logf("metrics exporter stopped")
+		return nil
+	}
+	return fmt.Errorf("metrics needs start or stop, got %q", args[0])
+}
+
 func status(f *fleet.Fleet) error {
 	ws := f.List()
 	cfg := f.Config()
 	fmt.Printf("%d worker(s) · %s/%s\n", len(ws), cfg.Org, orDefault(cfg.Group))
 	fmt.Printf("  token: %s\n", tokenState(f, cfg))
+	metricsState := "not running (make metrics)"
+	if f.MetricsRunning() {
+		metricsState = "http://" + cfg.MetricsAddr + "/metrics"
+	}
+	fmt.Printf("  metrics: %s\n", metricsState)
 	for _, w := range ws {
 		state := "stopped"
 		if w.Running {

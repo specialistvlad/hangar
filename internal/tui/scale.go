@@ -72,7 +72,7 @@ func (m *Model) startScale() tea.Cmd {
 		// Called from every provisioning goroutine at once. Dropping a stale line
 		// beats blocking a reconcile on a screen that is not draining, e.g. after
 		// the dashboard has quit.
-		err := m.flt.Scale(n, func(line string) {
+		err := m.flt.TryScale(n, func(line string) {
 			select {
 			case ch <- scaleMsg(line):
 			default:
@@ -89,6 +89,9 @@ func (m *Model) startScale() tea.Cmd {
 func (m *Model) scaleDone(msg scaleDoneMsg) tea.Cmd {
 	m.scaling, m.note = false, ""
 	m.refreshWorkers(msg.fleet)
+	if m.quitting {
+		return m.quit()
+	}
 
 	if msg.err != nil {
 		// Re-aim at reality: a failed pass leaves the fleet wherever it got to,
@@ -99,6 +102,15 @@ func (m *Model) scaleDone(msg scaleDoneMsg) tea.Cmd {
 		return nil
 	}
 	if m.want != msg.reached {
+		// The busy check a keypress made is as old as the keypress; a worker the
+		// chase would now remove may have picked up a job since.
+		for _, w := range m.sorted() {
+			if w.Index > m.want && w.Busy {
+				m.want, m.scaleErr = len(msg.fleet), fmt.Sprintf("w%d is busy — not removing it", w.Index)
+				m.layout()
+				return nil
+			}
+		}
 		return m.startScale()
 	}
 	m.layout() // the worker table just changed height
@@ -132,9 +144,26 @@ func (m *Model) scaleNote() string {
 	if !m.scaling {
 		return m.scaleErr
 	}
+	if m.quitting {
+		return "finishing the current scale before quitting · q again to leave it running unattended"
+	}
 	note := fmt.Sprintf("→ %d workers", m.want)
 	if m.note != "" {
 		note += " · " + m.note
 	}
 	return note + " · " + dur(time.Since(m.scaleSince))
+}
+
+// quit leaves the dashboard. A scale pass in flight is waited for on the first
+// press: its tar and config.sh would outlive the dashboard, and the next scale
+// would find the half-built worker and provision it a second time on top.
+func (m *Model) quit() tea.Cmd {
+	if m.scaling && !m.quitting {
+		m.quitting = true
+		return nil
+	}
+	if m.cancel != nil {
+		m.cancel()
+	}
+	return tea.Quit
 }

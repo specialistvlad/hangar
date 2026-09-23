@@ -12,23 +12,66 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
 
 // Release describes the runner build hangar should be installing.
 type Release struct {
-	Version string // e.g. "2.336.0"
-	URL     string
-	SHA256  string
+	Version  string // e.g. "2.336.0"
+	Platform string // e.g. "linux-x64", as runnerPlatform spells it
+	URL      string
+	SHA256   string
 }
 
-var shaRe = regexp.MustCompile(`<!-- BEGIN SHA osx-arm64 -->([a-f0-9]{64})<!-- END SHA osx-arm64 -->`)
+// runnerPlatform names the actions/runner build for goos/goarch the way its
+// release assets and checksum markers spell it.
+func runnerPlatform(goos, goarch string) (string, error) {
+	switch goos + "/" + goarch {
+	case "darwin/arm64":
+		return "osx-arm64", nil
+	case "darwin/amd64":
+		return "osx-x64", nil
+	case "linux/amd64":
+		return "linux-x64", nil
+	case "linux/arm64":
+		return "linux-arm64", nil
+	case "linux/arm":
+		return "linux-arm", nil
+	}
+	return "", fmt.Errorf("actions/runner publishes no build hangar can drive for %s/%s", goos, goarch)
+}
+
+// hostPlatform is runnerPlatform for the machine hangar is running on.
+func hostPlatform() (string, error) { return runnerPlatform(runtime.GOOS, machineArch()) }
+
+// assetName is the exact release asset for a platform and version. Matched in
+// full rather than by substring: releases also carry trimmed variants of the
+// same build, and picking one of those by accident installs a runner without
+// its bundled node.
+func assetName(platform, version string) string {
+	return fmt.Sprintf("actions-runner-%s-%s.tar.gz", platform, version)
+}
+
+// shaFor extracts a platform's checksum from the release notes.
+func shaFor(body, platform string) string {
+	q := regexp.QuoteMeta(platform)
+	re := regexp.MustCompile(`<!-- BEGIN SHA ` + q + ` -->([a-f0-9]{64})<!-- END SHA ` + q + ` -->`)
+	if m := re.FindStringSubmatch(body); m != nil {
+		return m[1]
+	}
+	return ""
+}
 
 // LatestRelease asks GitHub for the newest runner and the checksum published
 // alongside it. The checksum is embedded in the release notes rather than in a
 // separate asset, which is why the body is scraped.
 func (f *Fleet) LatestRelease() (*Release, error) {
+	platform, err := hostPlatform()
+	if err != nil {
+		return nil, err
+	}
 	var r struct {
 		Tag    string `json:"tag_name"`
 		Body   string `json:"body"`
@@ -42,24 +85,23 @@ func (f *Fleet) LatestRelease() (*Release, error) {
 		return nil, err
 	}
 
-	rel := &Release{Version: strings.TrimPrefix(r.Tag, "v")}
+	rel := &Release{Version: strings.TrimPrefix(r.Tag, "v"), Platform: platform}
+	want := assetName(platform, rel.Version)
 	for _, a := range r.Assets {
-		if strings.Contains(a.Name, "osx-arm64") && strings.HasSuffix(a.Name, ".tar.gz") {
+		if a.Name == want {
 			rel.URL = a.URL
 			break
 		}
 	}
 	if rel.URL == "" {
-		return nil, fmt.Errorf("release %s has no osx-arm64 asset", r.Tag)
+		return nil, fmt.Errorf("release %s has no %s asset", r.Tag, want)
 	}
-	if m := shaRe.FindStringSubmatch(r.Body); m != nil {
-		rel.SHA256 = m[1]
-	}
+	rel.SHA256 = shaFor(r.Body, platform)
 	return rel, nil
 }
 
-func (f *Fleet) tarballPath(version string) string {
-	return filepath.Join(f.cfg.CacheDir(), fmt.Sprintf("actions-runner-osx-arm64-%s.tar.gz", version))
+func (f *Fleet) tarballPath(rel *Release) string {
+	return filepath.Join(f.cfg.CacheDir(), assetName(rel.Platform, rel.Version))
 }
 
 // EnsureTarball downloads the release if it is not already cached, verifying
@@ -67,7 +109,7 @@ func (f *Fleet) tarballPath(version string) string {
 // verification is discarded rather than cached, so a corrupt download cannot
 // poison every future worker.
 func (f *Fleet) EnsureTarball(rel *Release, progress func(string)) (string, error) {
-	dst := f.tarballPath(rel.Version)
+	dst := f.tarballPath(rel)
 	if fi, err := os.Stat(dst); err == nil && fi.Size() > 0 {
 		if rel.SHA256 == "" {
 			return dst, nil
@@ -146,7 +188,11 @@ func fileSHA256(path string) (string, error) {
 // CachedTarball returns the newest runner tarball already on disk, so scaling
 // up works offline once anything has been downloaded.
 func (f *Fleet) CachedTarball() (string, error) {
-	matches, _ := filepath.Glob(filepath.Join(f.cfg.CacheDir(), "actions-runner-osx-arm64-*.tar.gz"))
+	platform, err := hostPlatform()
+	if err != nil {
+		return "", err
+	}
+	matches, _ := filepath.Glob(filepath.Join(f.cfg.CacheDir(), assetName(platform, "*")))
 	if len(matches) == 0 {
 		return "", fmt.Errorf("no runner tarball cached — run `make update` first")
 	}

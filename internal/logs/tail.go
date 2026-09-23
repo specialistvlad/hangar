@@ -30,6 +30,12 @@ type Event struct {
 	Kind   Kind
 	Text   string // console line, or job name for start/end
 	Result string // "Succeeded" / "Failed" / ... on KindJobEnd
+	// At is when the runner logged a job start or end, from the line's own
+	// timestamp; zero when the line carried none.
+	At time.Time
+	// Recovered marks a transition replayed from the log on attach rather than
+	// seen as it happened. A counter must not count it again.
+	Recovered bool
 }
 
 var (
@@ -41,12 +47,48 @@ var (
 	reANSI  = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 	// ##[group] and friends are workflow-command markers meant for the web UI.
 	reWorkflowCmd = regexp.MustCompile(`##\[(group|endgroup|command|debug|section)\]`)
+	// Every _diag line opens with the time the runner wrote it, in UTC.
+	reDiagStamp = regexp.MustCompile(`^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})Z `)
 )
+
+// stampOf reads a _diag line's leading timestamp.
+func stampOf(line string) time.Time {
+	m := reDiagStamp.FindStringSubmatch(line)
+	if m == nil {
+		return time.Time{}
+	}
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", m[1], time.UTC)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// jobEvent turns a Runner_*.log line into a job transition, if it is one.
+func jobEvent(worker int, line string) (Event, bool) {
+	if m := reJobStart.FindStringSubmatch(line); m != nil {
+		return Event{Worker: worker, Kind: KindJobStart, Text: m[1], At: stampOf(line)}, true
+	}
+	if m := reJobEnd.FindStringSubmatch(line); m != nil {
+		return Event{Worker: worker, Kind: KindJobEnd, Text: m[1], Result: m[2], At: stampOf(line)}, true
+	}
+	return Event{}, false
+}
 
 // Watch follows one worker's logs until ctx is canceled. It starts at the end
 // of the current files, so attaching mid-build shows what happens next rather
 // than replaying the whole job from the beginning.
 func Watch(ctx context.Context, worker int, workerDir string, out chan<- Event) {
+	watch(ctx, worker, workerDir, out, true)
+}
+
+// WatchJobs is Watch without the console output: only job starts and ends, for
+// a consumer that counts jobs rather than showing them.
+func WatchJobs(ctx context.Context, worker int, workerDir string, out chan<- Event) {
+	watch(ctx, worker, workerDir, out, false)
+}
+
+func watch(ctx context.Context, worker int, workerDir string, out chan<- Event, withPages bool) {
 	diag := filepath.Join(workerDir, "_diag")
 	runner := &tailer{glob: filepath.Join(diag, "Runner_*.log")}
 	pages := &tailer{glob: filepath.Join(diag, "pages", "*.log")}
@@ -67,11 +109,12 @@ func Watch(ctx context.Context, worker int, workerDir string, out chan<- Event) 
 			return
 		case <-tick.C:
 			for _, line := range runner.read() {
-				if m := reJobStart.FindStringSubmatch(line); m != nil {
-					send(ctx, out, Event{Worker: worker, Kind: KindJobStart, Text: m[1]})
-				} else if m := reJobEnd.FindStringSubmatch(line); m != nil {
-					send(ctx, out, Event{Worker: worker, Kind: KindJobEnd, Text: m[1], Result: m[2]})
+				if e, ok := jobEvent(worker, line); ok {
+					send(ctx, out, e)
 				}
+			}
+			if !withPages {
+				continue
 			}
 			for _, line := range pages.read() {
 				if line = clean(line); line != "" {
@@ -94,12 +137,9 @@ func recoverState(ctx context.Context, worker int, path string, out chan<- Event
 	}
 	lines := strings.Split(string(body), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		if m := reJobEnd.FindStringSubmatch(lines[i]); m != nil {
-			send(ctx, out, Event{Worker: worker, Kind: KindJobEnd, Text: m[1], Result: m[2]})
-			return
-		}
-		if m := reJobStart.FindStringSubmatch(lines[i]); m != nil {
-			send(ctx, out, Event{Worker: worker, Kind: KindJobStart, Text: m[1]})
+		if e, ok := jobEvent(worker, strings.TrimPrefix(lines[i], "\ufeff")); ok {
+			e.Recovered = true
+			send(ctx, out, e)
 			return
 		}
 	}

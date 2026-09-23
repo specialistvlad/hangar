@@ -19,7 +19,8 @@ import (
 var apiBase = "https://api.github.com"
 
 // Deadlines live on the request context rather than the client, so a slow
-// 125MB download is not held to the same budget as an API call.
+// runner download of a few hundred MB is not held to the same budget as an API
+// call.
 var httpClient = &http.Client{}
 
 const (

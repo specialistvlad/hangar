@@ -90,3 +90,81 @@ func TestSplitList(t *testing.T) {
 		t.Errorf("empty setting should yield nil, got %#v", got)
 	}
 }
+
+// A relative WORKER_TMP_ROOT would resolve against whatever directory each
+// runner happens to start in, so it is refused at load rather than obeyed.
+func TestWorkerTmpRoot(t *testing.T) {
+	for body, want := range map[string]string{
+		"":                               "",
+		"WORKER_TMP_ROOT=/mnt/tmp\n":     "/mnt/tmp",
+		"WORKER_TMP_ROOT=/mnt//tmp/./\n": "/mnt/tmp",
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(dir)
+		if err != nil {
+			t.Fatalf("Load(%q): %v", body, err)
+		}
+		if c.TmpRoot != want {
+			t.Errorf("Load(%q).TmpRoot = %q, want %q", body, c.TmpRoot, want)
+		}
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("WORKER_TMP_ROOT=tmp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err == nil {
+		t.Error("a relative WORKER_TMP_ROOT must be rejected")
+	}
+}
+
+func TestDefaultLang(t *testing.T) {
+	if got := defaultLang("darwin"); got != "en_US.UTF-8" {
+		t.Errorf("darwin default = %q", got)
+	}
+	// C.UTF-8 is the one UTF-8 locale every glibc since 2.35 ships prebuilt.
+	if got := defaultLang("linux"); got != "C.UTF-8" {
+		t.Errorf("linux default = %q", got)
+	}
+}
+
+func TestCleanSharePath(t *testing.T) {
+	ok := map[string]string{
+		".npm":              ".npm",
+		"~/.npm":            ".npm",
+		"  .cache/go-build": ".cache/go-build",
+		".config/gh":        ".config/gh",
+	}
+	for in, want := range ok {
+		got, err := cleanSharePath(in)
+		if err != nil {
+			t.Errorf("cleanSharePath(%q) errored: %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("cleanSharePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// A share entry names something inside the real home. Anything that escapes
+	// it would quietly link a worker at an arbitrary path.
+	for _, bad := range []string{"", "   ", "/etc/passwd", "..", "../..", "../.ssh", "a/../../b", "a/.."} {
+		if got, err := cleanSharePath(bad); err == nil {
+			t.Errorf("cleanSharePath(%q) should have failed, got %q", bad, got)
+		}
+	}
+}
+
+// A bad SHARE_PATHS entry fails the load, before any worker is registered.
+func TestLoadRejectsBadSharePaths(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("SHARE_PATHS=.npm,/opt/cache\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err == nil {
+		t.Error("an absolute SHARE_PATHS entry must fail Load")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -28,25 +29,48 @@ import (
 //
 //   - The macOS keychain is per-user, not per-HOME. A config.json carrying
 //     credsStore would still funnel every `docker login` into one shared
-//     daemon, so each worker gets an empty one.
+//     daemon, so each worker gets an empty one. Linux has the same trap in
+//     the desktop secret service, which the same helper sidesteps.
 //   - Docker resolves its CLI plugins and contexts under $HOME/.docker. A fresh
 //     home has neither, so buildx would vanish and the daemon socket would fall
 //     back to /var/run/docker.sock, which does not exist on Docker Desktop.
-const defaultPath = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+// defaultRunnerPath is the PATH a worker's jobs get when RUNNER_PATH is unset:
+// the system directories plus, on macOS, Homebrew and Docker Desktop's CLI in
+// the real home. Linux packages install docker and its plugins system-wide.
+func defaultRunnerPath(goos, realHome string) string {
+	if goos == "darwin" {
+		return "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" +
+			filepath.Join(realHome, ".docker", "bin")
+	}
+	return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+}
 
 // workerHome is the private home directory handed to worker n's jobs.
 func (f *Fleet) workerHome(n int) string { return filepath.Join(f.cfg.WorkerDir(n), "home") }
 
+// workerTmp is worker n's TMPDIR: inside its directory by default, or under
+// WORKER_TMP_ROOT when that is set — typically a size-capped tmpfs, so scratch
+// files never reach the disk and a reboot clears them.
+func (f *Fleet) workerTmp(n int) string {
+	if f.cfg.TmpRoot != "" {
+		return filepath.Join(f.cfg.TmpRoot, fmt.Sprintf("w%d", n))
+	}
+	return filepath.Join(f.cfg.WorkerDir(n), "tmp")
+}
+
 // writeIsolation builds worker n's private home and the .env that points at it.
 func (f *Fleet) writeIsolation(n int) error {
 	home := f.workerHome(n)
-	tmp := filepath.Join(f.cfg.WorkerDir(n), "tmp")
 	dockerCfg := filepath.Join(home, ".docker")
 
-	for _, d := range []string{home, tmp, dockerCfg} {
+	for _, d := range []string{home, dockerCfg} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}
+	}
+	if err := f.prepareTmp(n); err != nil {
+		return err
 	}
 	if err := f.fixupDocker(dockerCfg); err != nil {
 		return err
@@ -62,8 +86,9 @@ func (f *Fleet) fixupDocker(dockerCfg string) error {
 	// An empty config is NOT enough. With credsStore unset the Docker CLI falls
 	// back to a platform default — docker-credential-osxkeychain on macOS — and
 	// a keychain write from a launchd agent raises a SecurityAgent dialog that
-	// nobody can click, so every `docker login` blocks forever. Naming our own
-	// helper removes the fallback entirely.
+	// nobody can click, so every `docker login` blocks forever. On Linux the
+	// default is pass or the desktop secret service, neither of which a
+	// headless service has. Naming our own helper removes the fallback.
 	cfg := fmt.Sprintf("{\n  \"credsStore\": %q\n}\n", credhelper.Name)
 	if err := os.WriteFile(filepath.Join(dockerCfg, "config.json"), []byte(cfg), 0o600); err != nil {
 		return err
@@ -72,12 +97,26 @@ func (f *Fleet) fixupDocker(dockerCfg string) error {
 		return err
 	}
 	// buildx and compose are CLI plugins resolved under $HOME/.docker; without
-	// this link the first `docker buildx build` fails with "unknown command".
+	// this link the first `docker buildx build` fails with "unknown command" on
+	// Docker Desktop. Linux packages install them system-wide instead, where the
+	// CLI finds them regardless, and the real home usually has no such
+	// directory. Linking to one that does not exist would leave a dangling
+	// link, and every job that installs a plugin — setup-buildx-action with a
+	// pinned version does — would fail to create the directory. So the worker
+	// gets a private, empty one in that case.
 	real, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	return link(filepath.Join(real, ".docker", "cli-plugins"), filepath.Join(dockerCfg, "cli-plugins"))
+	shared := filepath.Join(real, ".docker", "cli-plugins")
+	private := filepath.Join(dockerCfg, "cli-plugins")
+	if fi, err := os.Stat(shared); err == nil && fi.IsDir() {
+		return link(shared, private)
+	}
+	if err := os.RemoveAll(private); err != nil {
+		return err
+	}
+	return os.MkdirAll(private, 0o700)
 }
 
 // linkCredHelper places docker-credential-hangar on the worker's PATH, pointing
@@ -105,11 +144,8 @@ func (f *Fleet) shareBack(home string) error {
 	if err != nil {
 		return err
 	}
-	for _, raw := range f.cfg.SharePaths {
-		rel, err := cleanSharePath(raw)
-		if err != nil {
-			return err
-		}
+	// Entries were validated when .env was loaded; see config.cleanSharePath.
+	for _, rel := range f.cfg.SharePaths {
 		dst := filepath.Join(home, rel)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return err
@@ -122,19 +158,6 @@ func (f *Fleet) shareBack(home string) error {
 		}
 	}
 	return nil
-}
-
-// cleanSharePath validates one SHARE_PATHS entry. Entries name a path inside
-// the real home, so an absolute path or a .. escape is rejected rather than
-// silently linking a worker at something outside it.
-func cleanSharePath(raw string) (string, error) {
-	rel := strings.TrimPrefix(strings.TrimSpace(raw), "~/")
-	if rel == "" || strings.HasPrefix(rel, "/") || rel == ".." ||
-		strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") ||
-		strings.HasSuffix(rel, "/..") {
-		return "", fmt.Errorf("SHARE_PATHS entry %q must be a plain path relative to your home directory", raw)
-	}
-	return rel, nil
 }
 
 // link replaces dst with a symlink to src.
@@ -151,14 +174,15 @@ func link(src, dst string) error {
 func (f *Fleet) workerEnv(n int) string {
 	env := []string{
 		"HOME=" + f.workerHome(n),
-		"TMPDIR=" + filepath.Join(f.cfg.WorkerDir(n), "tmp"),
+		"TMPDIR=" + f.workerTmp(n),
 		"HANGAR_WORKER=" + strconv.Itoa(n),
 		// Declared rather than inherited: the runner's own env.sh would otherwise
 		// capture whatever locale the invoking shell had.
 		"LANG=" + f.cfg.Lang,
 	}
-	// Required, not optional: a private HOME has no docker contexts to resolve
-	// the daemon from, and Docker Desktop does not create /var/run/docker.sock.
+	// Required on macOS, not optional: a private HOME has no docker contexts to
+	// resolve the daemon from, and Docker Desktop does not create
+	// /var/run/docker.sock. On Linux it states the default socket outright.
 	if f.cfg.DockerHost != "" {
 		env = append(env, "DOCKER_HOST="+f.cfg.DockerHost)
 	}
@@ -172,7 +196,7 @@ func (f *Fleet) runnerPath(n int) string {
 	base := f.cfg.RunnerPath
 	if base == "" {
 		real, _ := os.UserHomeDir()
-		base = defaultPath + ":" + filepath.Join(real, ".docker", "bin")
+		base = defaultRunnerPath(runtime.GOOS, real)
 	}
 	// The credential helper must precede everything, or the CLI's platform
 	// default wins and jobs deadlock on a keychain prompt.

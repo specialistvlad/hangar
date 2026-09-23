@@ -1,0 +1,250 @@
+// Package exporter serves the fleet's state in the Prometheus text format: which
+// workers are up, which are busy and on what, and how jobs end and how long
+// they take. It reads only what hangar already reads — the supervisor's view of
+// the fleet and the runner's own _diag logs — and needs no GitHub access.
+package exporter
+
+import (
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"github.com/specialistvlad/hangar/internal/fleet"
+	"github.com/specialistvlad/hangar/internal/logs"
+)
+
+// results are the outcomes jobs are counted under; resultOf maps the runner's
+// own results onto them.
+var results = []string{"succeeded", "failed", "canceled"}
+
+// durationBuckets span a lint job to a cold image build, in seconds.
+var durationBuckets = []float64{30, 60, 120, 300, 600, 900, 1200, 1800, 2700, 3600, 5400, 7200}
+
+// jobLabelMax caps the job_name label: display names embed matrix values and
+// can run to hundreds of characters. The label is job_name, not job: job and
+// instance are the labels Prometheus attaches to every scraped series, and an
+// exported one is renamed to exported_job on ingestion.
+const jobLabelMax = 80
+
+// infoAttempts bounds the lookups of a job's repository and run: the worker
+// log appears within seconds of the job starting, so a job whose log never
+// does keeps the runner's display name alone.
+const infoAttempts = 24
+
+type workerState struct {
+	runner  string
+	up      bool
+	busy    bool
+	job     string // display name from the runner log
+	start   time.Time
+	lastEnd time.Time
+	info    logs.JobInfo
+	infoOK  bool
+	tries   int
+	jobs    map[string]uint64 // result -> count since the exporter started
+}
+
+// Collector holds the fleet's state between scrapes. Every method is safe to
+// call from several goroutines.
+type Collector struct {
+	mu        sync.Mutex
+	workers   map[int]*workerState
+	durations *histogram
+	version   string
+	commit    string
+	now       func() time.Time
+}
+
+func NewCollector(version, commit string) *Collector {
+	return &Collector{
+		workers:   map[int]*workerState{},
+		durations: newHistogram(durationBuckets, results...),
+		version:   version,
+		commit:    commit,
+		now:       time.Now,
+	}
+}
+
+func (c *Collector) worker(n int) *workerState {
+	w := c.workers[n]
+	if w == nil {
+		w = &workerState{jobs: map[string]uint64{}}
+		c.workers[n] = w
+	}
+	return w
+}
+
+// SetFleet applies a fleet listing. A worker is up while its runner is
+// registered and its listener process runs; a worker no longer on disk drops
+// out, with its series.
+func (c *Collector) SetFleet(ws []fleet.Worker) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seen := map[int]bool{}
+	for _, fw := range ws {
+		seen[fw.Index] = true
+		w := c.worker(fw.Index)
+		w.runner = fw.Name
+		w.up = fw.Registered && fw.Running
+	}
+	for n := range c.workers {
+		if !seen[n] {
+			delete(c.workers, n)
+		}
+	}
+}
+
+// Apply takes one job transition from a worker's runner log. A transition
+// replayed on attach restores state but is not counted: it was counted, if at
+// all, by the exporter that saw it happen.
+func (c *Collector) Apply(e logs.Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	w := c.worker(e.Worker)
+	at := e.At
+	if at.IsZero() {
+		at = c.now()
+	}
+	switch e.Kind {
+	case logs.KindJobStart:
+		w.busy, w.job, w.start = true, e.Text, at
+		w.info, w.infoOK, w.tries = logs.JobInfo{}, false, 0
+	case logs.KindJobEnd:
+		if !e.Recovered {
+			r := resultOf(e.Result)
+			w.jobs[r]++
+			if w.busy && !w.start.IsZero() && !at.Before(w.start) {
+				c.durations.observe(r, at.Sub(w.start).Seconds())
+			}
+		}
+		w.busy, w.job, w.start, w.lastEnd = false, "", time.Time{}, at
+		w.info, w.infoOK = logs.JobInfo{}, false
+	case logs.KindLine:
+	}
+}
+
+// PendingInfo lists the busy workers whose job's repository and run are not
+// known yet, with the start of that job.
+func (c *Collector) PendingInfo() map[int]time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := map[int]time.Time{}
+	for n, w := range c.workers {
+		if w.busy && !w.infoOK && w.tries < infoAttempts {
+			out[n] = w.start
+		}
+	}
+	return out
+}
+
+// SetJobInfo records a lookup for the job that started on worker n at start —
+// the result if found, one more attempt if not. A job that has meanwhile ended
+// or been replaced is left alone.
+func (c *Collector) SetJobInfo(n int, start time.Time, info logs.JobInfo, found bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	w := c.workers[n]
+	if w == nil || !w.busy || !w.start.Equal(start) {
+		return
+	}
+	if found {
+		w.info, w.infoOK = info, true
+		return
+	}
+	w.tries++
+}
+
+// resultOf maps the runner's job result onto the three counted outcomes.
+func resultOf(r string) string {
+	switch strings.ToLower(r) {
+	case "succeeded", "succeededwithissues":
+		return "succeeded"
+	case "canceled", "abandoned":
+		return "canceled"
+	}
+	return "failed"
+}
+
+func truncate(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:n-1]) + "…"
+}
+
+// Render writes every family in the text exposition format.
+func (c *Collector) Render(out io.Writer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	idx := make([]int, 0, len(c.workers))
+	for n := range c.workers {
+		idx = append(idx, n)
+	}
+	sort.Ints(idx)
+	ids := func(n int) []label {
+		return []label{{"worker", fmt.Sprintf("w%d", n)}, {"runner", c.workers[n].runner}}
+	}
+	gauge := func(name, help string, value func(*workerState) (float64, bool)) {
+		family(out, name, "gauge", help)
+		for _, n := range idx {
+			if v, ok := value(c.workers[n]); ok {
+				sample(out, name, ids(n), v)
+			}
+		}
+	}
+	bit := func(b bool) float64 {
+		if b {
+			return 1
+		}
+		return 0
+	}
+	stamp := func(t time.Time) (float64, bool) { return float64(t.Unix()), !t.IsZero() }
+
+	family(out, "hangar_build_info", "gauge", "The hangar build serving these metrics.")
+	sample(out, "hangar_build_info", []label{{"version", c.version}, {"commit", c.commit}}, 1)
+	family(out, "hangar_workers_configured", "gauge", "Workers hangar manages on this machine.")
+	sample(out, "hangar_workers_configured", nil, float64(len(idx)))
+
+	gauge("hangar_worker_up", "1 while the worker's runner is registered and its listener process runs.",
+		func(w *workerState) (float64, bool) { return bit(w.up), true })
+	gauge("hangar_worker_busy", "1 while the worker is running a job.",
+		func(w *workerState) (float64, bool) { return bit(w.busy), true })
+
+	family(out, "hangar_worker_job_info", "gauge", "The job a busy worker is running; present only while busy.")
+	for _, n := range idx {
+		w := c.workers[n]
+		if !w.busy {
+			continue
+		}
+		name := w.job
+		if w.infoOK && w.info.Name != "" {
+			name = w.info.Name
+		}
+		sample(out, "hangar_worker_job_info", append(ids(n),
+			label{"job_name", truncate(name, jobLabelMax)}, label{"workflow", w.info.Workflow},
+			label{"repo", w.info.Repo}, label{"run_id", w.info.RunID}), 1)
+	}
+	gauge("hangar_worker_job_start_timestamp_seconds", "Unix time the current job started; absent while idle.",
+		func(w *workerState) (float64, bool) {
+			if !w.busy {
+				return 0, false
+			}
+			return stamp(w.start)
+		})
+	gauge("hangar_worker_last_job_end_timestamp_seconds", "Unix time the worker's last job ended.",
+		func(w *workerState) (float64, bool) { return stamp(w.lastEnd) })
+
+	family(out, "hangar_jobs_total", "counter", "Jobs finished since the exporter started, by result.")
+	for _, n := range idx {
+		for _, r := range results {
+			sample(out, "hangar_jobs_total", append(ids(n), label{"result", r}), float64(c.workers[n].jobs[r]))
+		}
+	}
+	family(out, "hangar_job_duration_seconds", "histogram", "Job duration, start to end, by result.")
+	c.durations.write(out, "hangar_job_duration_seconds", "result")
+}

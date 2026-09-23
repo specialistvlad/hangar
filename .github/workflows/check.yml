@@ -10,9 +10,14 @@ permissions:
 
 jobs:
   check:
-    # darwin/arm64 only, and the runner is what hangar drives — so the checks
-    # run on the one platform the code supports rather than a cheaper linux box.
-    runs-on: macos-latest
+    # hangar drives launchd on macOS and systemd on Linux, and each platform's
+    # supervisor, metrics and tests only compile there — so the checks run on
+    # both rather than cross-compiling one from the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
