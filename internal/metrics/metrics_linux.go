@@ -28,25 +28,33 @@ type dockerState struct {
 // dockerCgroupPatterns are where docker's work runs on a systemd host, relative
 // to the cgroup root. The daemon and containerd are services; each container
 // is a docker-<id>.scope; each BuildKit build step gets a transient cgroup
-// named system.slice:docker:<id> for as long as the step runs. The last entry
-// covers the cgroupfs driver, which nests everything under one parent whose
-// counters already include its children.
+// named system.slice:docker:<id> for as long as the step runs. Rootless docker
+// runs the same units one level down, under the invoking user's own systemd
+// instance: user.slice/user-<uid>.slice/user@<uid>.service/<scope>.slice/.
+// The last entry covers the cgroupfs driver, which nests everything under one
+// parent whose counters already include its children.
 var dockerCgroupPatterns = []string{
 	"system.slice/docker.service",
 	"system.slice/snap.docker.dockerd.service",
 	"system.slice/containerd.service",
 	"system.slice/docker-*.scope",
 	"system.slice/system.slice:docker:*",
+	"user.slice/user-*.slice/user@*.service/*.slice/docker.service",
+	"user.slice/user-*.slice/user@*.service/*.slice/containerd.service",
+	"user.slice/user-*.slice/user@*.service/*.slice/docker-*.scope",
 	"docker",
 }
 
 // dockerCgroups lists the cgroups docker's work currently runs in, and whether
-// a docker daemon is there at all — containerd alone does not count. Under the
-// systemd driver the daemon is docker.service, or snap.docker.dockerd.service
+// a docker daemon is there at all — containerd alone does not count, be it the
+// system instance or the one rootless docker starts under the user's. Under
+// the systemd driver the daemon is docker.service, or snap.docker.dockerd.service
 // for Ubuntu's snap; a container scope or a build step's cgroup exists only
-// while a daemon has work, so either proves one too. Under the cgroupfs driver
-// its work sits under a bare docker cgroup that outlives the daemon, so that
-// one counts only while something is still running in it.
+// while a daemon has work, so either proves one too, rootless or not. Under the
+// cgroupfs driver its work sits under a bare docker cgroup that outlives the
+// daemon, so that one counts only while something is still running in it. A
+// host matching none of these layouts reads as no daemon running, the same as
+// one where docker genuinely is not installed.
 func dockerCgroups(root string) (dirs []string, found bool) {
 	for _, pat := range dockerCgroupPatterns {
 		matches, _ := filepath.Glob(filepath.Join(root, pat))
@@ -56,7 +64,8 @@ func dockerCgroups(root string) (dirs []string, found bool) {
 			}
 			dirs = append(dirs, m)
 			switch pat {
-			case "system.slice/containerd.service":
+			case "system.slice/containerd.service",
+				"user.slice/user-*.slice/user@*.service/*.slice/containerd.service":
 			case "docker":
 				found = found || populated(m)
 			default:

@@ -150,6 +150,49 @@ func TestDockerCgroupsFindSnapAndScopes(t *testing.T) {
 	}
 }
 
+// Rootless docker runs its daemon under the invoking user's own systemd
+// instance, one level below system.slice, so it needs its own glob to be
+// found at all.
+func TestDockerCgroupsFindRootless(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "user.slice", "user-1000.slice", "user@1000.service", "app.slice", "docker.service")
+	writeCgroup(t, dir, "usage_usec 1\n", "1", "")
+	if _, found := dockerCgroups(root); !found {
+		t.Error("rootless docker.service should count as a running daemon")
+	}
+}
+
+// A rootless container's scope proves a daemon the same as a rootful one's.
+func TestDockerCgroupsFindRootlessScope(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "user.slice", "user-1000.slice", "user@1000.service", "app.slice", "docker-abc.scope")
+	writeCgroup(t, dir, "usage_usec 1\n", "1", "")
+	if _, found := dockerCgroups(root); !found {
+		t.Error("a rootless container scope should count as a running daemon")
+	}
+}
+
+// Rootless containerd alone, same as the system instance, is not docker.
+func TestDockerCgroupsRootlessContainerdAlone(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "user.slice", "user-1000.slice", "user@1000.service", "app.slice", "containerd.service")
+	writeCgroup(t, dir, "usage_usec 1\n", "1", "")
+	if _, found := dockerCgroups(root); found {
+		t.Error("rootless containerd alone should not count as a docker daemon")
+	}
+}
+
+// A host with neither the rootful nor the rootless layout — docker not
+// installed, or Docker Desktop for Linux running its daemon in a VM — reads
+// as no daemon running rather than as "cannot tell".
+func TestDockerCgroupsNoKnownLayout(t *testing.T) {
+	root := t.TempDir()
+	writeCgroup(t, filepath.Join(root, "system.slice", "sshd.service"), "usage_usec 1\n", "1", "")
+	if _, found := dockerCgroups(root); found {
+		t.Error("a host with no known docker cgroup layout should read as not running")
+	}
+}
+
 func TestParseDockerInfo(t *testing.T) {
 	root, snap := parseDockerInfo(`/lex/docker|[["driver-type","io.containerd.snapshotter.v1"]]` + "\n")
 	if root != "/lex/docker" || !snap {
