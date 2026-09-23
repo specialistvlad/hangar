@@ -37,6 +37,13 @@ func (f *Fleet) List() []Worker {
 	return f.list(loaded)
 }
 
+// ListChecked is List for a caller that must tell "stopped" from "could not
+// ask the supervisor": the workers on disk come back either way.
+func (f *Fleet) ListChecked() ([]Worker, error) {
+	loaded, err := loadedServices()
+	return f.list(loaded), err
+}
+
 // list is List against a given view of the supervisor, so that what is
 // decided from a listing can also be tested without one.
 func (f *Fleet) list(loaded map[int]int) []Worker {
@@ -108,10 +115,12 @@ func exists(path string) bool {
 // provisioning step, so a running one is marked; one that is registered but
 // not running is left to be completed in place. The supervisor must have
 // answered: reading a failed listing as "nothing runs" would rebuild — and
-// restart — every such worker, canceling their jobs.
-func (f *Fleet) migrateMarkers(ws []Worker, listErr error) error {
+// restart — every such worker, canceling their jobs. Only workers a scale to n
+// keeps matter: one above n is removed either way, so a scale-down still works
+// when the supervisor does not answer.
+func (f *Fleet) migrateMarkers(n int, ws []Worker, listErr error) error {
 	for i, w := range ws {
-		if !w.Registered || w.Ready {
+		if !w.Registered || w.Ready || w.Index > n {
 			continue
 		}
 		if listErr != nil {

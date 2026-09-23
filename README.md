@@ -116,7 +116,10 @@ default labels, such as `self-hosted, macOS, ARM64` or `self-hosted, Linux, X64`
 describe the machine, not who manages it. Add `Linux` or `macOS` to `runs-on` to
 pick a platform when the org has hangar fleets on both.
 Labels are fixed at registration, so a fleet that predates this needs one
-`make 0 && make <n>` to pick it up.
+`make 0 && make <n>` to pick it up. The same holds for every per-worker setting —
+`RUNNER_LABELS`, `RUNNER_PATH`, `RUNNER_LANG`, `SHARE_PATHS`, `WORKER_TMP_ROOT` — and for
+the service definitions a newer hangar writes: they reach workers created after the
+change. `make 0 && make <n>` while the fleet is idle applies them to all.
 
 First run fetches the runner release, and a Go toolchain too unless a matching one
 is already installed. Later runs build from cache.
@@ -323,11 +326,14 @@ org as **offline**, until a working token exists or an operator deletes them in
 ## Metrics
 
 `make metrics` runs `hangar serve` as one more supervised service next to the workers —
-`hangar-metrics.service` on Linux, the `com.hangar.metrics` agent on macOS — enabled
-for boot and restarted if it dies. It answers Prometheus scrapes at
-`http://127.0.0.1:9151/metrics` (`METRICS_ADDR` in `.env`; loopback by default,
-since the metrics name repositories and jobs). `make status` shows whether it is up.
-Re-run `make metrics` after rebuilding hangar to restart it on the new binary.
+`hangar-metrics.service` on Linux, enabled for boot; the `com.hangar.metrics` agent on
+macOS, loaded at login — restarted if it dies. It answers Prometheus scrapes at
+`http://127.0.0.1:9151/metrics` (`METRICS_ADDR` in `.env`), and `make metrics` returns
+only once that address answers with this build's own `hangar_build_info`, so a port
+held by something else is reported rather than mistaken for success. `make status`
+shows whether it is up. Re-run `make metrics` after rebuilding hangar to restart it on
+the new binary. The endpoint has no authentication: loopback keeps it off the network,
+not away from other accounts on the machine — see [SECURITY.md](SECURITY.md).
 
 | Metric | Labels | Meaning |
 |---|---|---|
@@ -479,12 +485,15 @@ Everything lives in this directory:
 .bin/            hangar, golangci-lint, gotestsum
 ```
 
-There are two exceptions. The first is where the service manager loads workers
+There are three exceptions. The first is where the service manager loads workers
 from: `~/Library/LaunchAgents/com.hangar.w*.plist` on macOS, because that is the only
 location launchd loads login agents from, and `~/.config/systemd/user/hangar-w*.service`
 on Linux, for the same reason. The second is opt-in: with `WORKER_TMP_ROOT` set, each
 worker's `TMPDIR` lives at `<WORKER_TMP_ROOT>/w<n>`. `make 0` and `make kill` remove
-both.
+both. The third is the exporter's own service, `com.hangar.metrics.plist` or
+`hangar-metrics.service`, written by `make metrics`. `make 0` and `make kill` leave it
+running on purpose — it then reports an empty fleet — and `make metrics-stop` or
+`make nuke` removes it.
 
 Settings come from `.env` and nowhere else — the ambient environment is never
 consulted, so a fleet behaves the same from any shell, service manager or cron job.

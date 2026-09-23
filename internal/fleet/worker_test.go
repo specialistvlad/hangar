@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,24 +54,30 @@ func TestPlanCompletesUnfinishedWorkers(t *testing.T) {
 
 // Workers from before the marker get it once, if their service runs — that
 // meant every provisioning step had finished. A registered one that is not
-// running is left to be completed. And a supervisor that could not be asked
-// stops the scale: read as "nothing runs", it would rebuild and restart every
-// such worker, canceling their jobs.
+// running is left to be completed. A supervisor that could not be asked stops
+// any scale that keeps an unmarked worker: read as "nothing runs", it would
+// rebuild and restart such workers, canceling their jobs. A scale that removes
+// every unmarked worker, and one where all are marked, go ahead regardless.
 func TestMigrateMarkers(t *testing.T) {
 	f := New(&config.Config{Root: t.TempDir(), NamePrefix: "t-w"})
-	mkWorker(t, f, 1, true, false)
-	mkWorker(t, f, 2, true, false)
+	mkWorker(t, f, 1, true, false) // pre-marker, running
+	mkWorker(t, f, 2, true, false) // pre-marker, not running
 	mkWorker(t, f, 3, true, true)
+	mkWorker(t, f, 5, true, false) // pre-marker, above the target below
+	failed := errors.New("launchctl list: timeout")
 
-	if err := f.migrateMarkers(f.list(map[int]int{1: 100}), errors.New("launchctl list: timeout")); err == nil {
-		t.Fatal("a failed listing with unmarked workers must stop the scale")
+	if err := f.migrateMarkers(3, f.list(nil), failed); err == nil {
+		t.Fatal("a failed listing with an unmarked worker the scale keeps must stop it")
 	}
 	if exists(filepath.Join(f.cfg.WorkerDir(1), readyMarker)) {
 		t.Fatal("nothing may be marked when the listing failed")
 	}
+	if err := f.migrateMarkers(0, f.list(nil), failed); err != nil {
+		t.Errorf("a scale to 0 keeps no worker, so a failed listing must not stop it: %v", err)
+	}
 
 	ws := f.list(map[int]int{1: 100, 2: 0})
-	if err := f.migrateMarkers(ws, nil); err != nil {
+	if err := f.migrateMarkers(3, ws, nil); err != nil {
 		t.Fatal(err)
 	}
 	if add, _ := plan(3, ws); !reflect.DeepEqual(add, []int{2}) {
@@ -80,10 +86,13 @@ func TestMigrateMarkers(t *testing.T) {
 	if !exists(filepath.Join(f.cfg.WorkerDir(1), readyMarker)) {
 		t.Error("the running pre-marker worker should now carry the marker")
 	}
+	if err := f.migrateMarkers(3, f.list(nil), failed); err == nil {
+		t.Error("w2 is still unmarked, so a failed listing must still stop a scale that keeps it")
+	}
 
-	// Once every worker has its marker, a failed listing no longer matters.
-	if err := f.migrateMarkers(f.list(nil), errors.New("launchctl list: timeout")); err == nil {
-		t.Error("w2 is still unmarked, so the failure must still stop the scale")
+	mkWorker(t, f, 2, true, true)
+	if err := f.migrateMarkers(3, f.list(nil), failed); err != nil {
+		t.Errorf("with every kept worker marked, a failed listing no longer matters: %v", err)
 	}
 }
 
@@ -195,16 +204,24 @@ func TestCheckTmpRootRefusesSharedParents(t *testing.T) {
 	if err := checkTmpRoot(filepath.Join(shared, "hangar-tmp")); err == nil {
 		t.Error("a root inside a world-writable directory must be refused")
 	}
+	// The pass case needs a private chain of ancestors. t.TempDir() is under a
+	// world-writable /tmp on Linux, and on macOS too when TMPDIR points there,
+	// so the case runs only when the temp dir really is private.
 	own := filepath.Join(t.TempDir(), "own")
 	if err := os.Mkdir(own, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// t.TempDir() itself lives under a world-writable /tmp on Linux, so only
-	// macOS, whose per-user temp directory is private, exercises the pass case.
-	if runtime.GOOS == "darwin" {
-		if err := checkTmpRoot(filepath.Join(own, "hangar-tmp")); err != nil {
-			t.Errorf("a root in a private directory was refused: %v", err)
+	real, err := filepath.EvalSymlinks(own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for dir := filepath.Dir(real); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm()&0o002 != 0 {
+			t.Skipf("temp dir %s is under a world-writable %s; no private place to test the pass case", own, dir)
 		}
+	}
+	if err := checkTmpRoot(filepath.Join(own, "hangar-tmp")); err != nil {
+		t.Errorf("a root in a private directory was refused: %v", err)
 	}
 }
 
@@ -264,4 +281,26 @@ func TestFixupDockerPluginsDirectory(t *testing.T) {
 	if target, err := os.Readlink(filepath.Join(cfg, "cli-plugins")); err != nil || target != shared {
 		t.Errorf("with shared plugins present, want a link to %s, got %q, %v", shared, target, err)
 	}
+}
+
+// Kill takes no lock, but warns that a scale running elsewhere may recreate
+// what it removes.
+func TestKillWarnsAboutARunningScale(t *testing.T) {
+	f := New(&config.Config{Root: t.TempDir(), NamePrefix: "t-w"})
+	if err := os.MkdirAll(f.cfg.WorkersDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockScale(f.lockPath(), func(string) {}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	var said []string
+	f.Kill(func(s string) { said = append(said, s) })
+	for _, s := range said {
+		if strings.Contains(s, "a scale is running") {
+			return
+		}
+	}
+	t.Errorf("no warning about the running scale in %q", said)
 }

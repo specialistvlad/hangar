@@ -89,17 +89,19 @@ func (m *Model) startScale() tea.Cmd {
 func (m *Model) scaleDone(msg scaleDoneMsg) tea.Cmd {
 	m.scaling, m.note = false, ""
 	m.refreshWorkers(msg.fleet)
-	if m.quitting {
-		return m.quit()
-	}
-
 	if msg.err != nil {
+		// A failed pass keeps the dashboard open even after a quit was asked
+		// for: its error would otherwise vanish with the screen.
+		m.quitting = false
 		// Re-aim at reality: a failed pass leaves the fleet wherever it got to,
 		// and the next keypress should count from there rather than from a target
 		// that was never reached.
 		m.want, m.scaleErr = len(msg.fleet), msg.err.Error()
 		m.layout()
 		return nil
+	}
+	if m.quitting {
+		return m.quit()
 	}
 	if m.want != msg.reached {
 		// The busy check a keypress made is as old as the keypress; a worker the
@@ -145,7 +147,7 @@ func (m *Model) scaleNote() string {
 		return m.scaleErr
 	}
 	if m.quitting {
-		return "finishing the current scale before quitting · q again to leave it running unattended"
+		return "finishing the current scale before quitting · q again to quit now and abandon it (the next scale finishes the half-built worker)"
 	}
 	note := fmt.Sprintf("→ %d workers", m.want)
 	if m.note != "" {

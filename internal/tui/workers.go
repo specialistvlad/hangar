@@ -22,6 +22,10 @@ func (m *Model) apply(e logs.Event) {
 		w.Job, w.Busy, w.Since, w.LastResult = e.Text, true, time.Now(), ""
 	case logs.KindJobEnd:
 		w.Busy, w.Job, w.LastResult = false, "", e.Result
+	case logs.KindListening:
+		// The listener (re)started, so no job is running — including one whose
+		// listener died without logging an end.
+		w.Busy, w.Job = false, ""
 	case logs.KindLine:
 		if collapseInto(m.lines, e.Worker, e.Text) {
 			m.render()

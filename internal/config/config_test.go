@@ -168,3 +168,32 @@ func TestLoadRejectsBadSharePaths(t *testing.T) {
 		t.Error("an absolute SHARE_PATHS entry must fail Load")
 	}
 }
+
+// METRICS_ADDR must be something a listener can bind, or the exporter would
+// only fail inside its service, restarting forever.
+func TestMetricsAddr(t *testing.T) {
+	load := func(v string) (*Config, error) {
+		dir := t.TempDir()
+		body := ""
+		if v != "-" {
+			body = "METRICS_ADDR=" + v + "\n"
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(dir)
+	}
+	if c, err := load("-"); err != nil || c.MetricsAddr != "127.0.0.1:9151" {
+		t.Errorf("unset: got %v, %v; want the loopback default", c, err)
+	}
+	for _, ok := range []string{"127.0.0.1:9151", "[::1]:9151", ":9151", "0.0.0.0:1"} {
+		if _, err := load(ok); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"9151", "127.0.0.1:", ":0", "127.0.0.1:99999", "localhost:abc", "127.0.0.1:9151 # x"} {
+		if _, err := load(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

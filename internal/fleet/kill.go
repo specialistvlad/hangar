@@ -52,7 +52,7 @@ func (f *Fleet) Kill(progress func(string)) int {
 	}
 	loaded, err := loadedServices()
 	if err != nil {
-		progress(fmt.Sprintf("warning: %v — killing what is on disk and in the unit files", err))
+		progress(fmt.Sprintf("warning: %v — killing what is on disk and in the service definitions", err))
 	}
 	targets := killTargets(f.list(loaded), loaded)
 	for _, n := range targets {

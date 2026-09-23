@@ -71,7 +71,7 @@ func (f *Fleet) scale(n int, progress func(string), wait bool) error {
 
 	loaded, listErr := loadedServices()
 	ws := f.list(loaded)
-	if err := f.migrateMarkers(ws, listErr); err != nil {
+	if err := f.migrateMarkers(n, ws, listErr); err != nil {
 		return err
 	}
 	add, drop := plan(n, ws)

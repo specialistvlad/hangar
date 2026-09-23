@@ -63,10 +63,17 @@ GOROOT_DIR := $(GO_DIR)
 endif
 BIN       := $(ROOT)/.bin/hangar
 # What hangar_build_info reports: the checkout's commit, marked dirty when it
-# has uncommitted changes, and the nearest tag if there is one.
-HANGAR_COMMIT  := $(shell git -C $(ROOT) rev-parse --short=12 HEAD 2>/dev/null || echo unknown)$(shell git -C $(ROOT) diff --quiet HEAD -- 2>/dev/null || echo -dirty)
+# has uncommitted changes (untracked sources included), and the nearest tag if
+# there is one. Outside a git checkout both are unknown, not dirty.
+HANGAR_HEAD    := $(shell git -C $(ROOT) rev-parse --short=12 HEAD 2>/dev/null)
+HANGAR_COMMIT  := $(if $(HANGAR_HEAD),$(HANGAR_HEAD)$(if $(shell git -C $(ROOT) status --porcelain 2>/dev/null),-dirty),unknown)
 HANGAR_VERSION := $(shell git -C $(ROOT) describe --tags --always 2>/dev/null || echo dev)
 LDFLAGS   := -X main.version=$(HANGAR_VERSION) -X main.commit=$(HANGAR_COMMIT)
+# The stamp is rewritten only when it changes, and the binary depends on it:
+# a commit or a clean-up alone must rebuild, or build_info would name a
+# commit the binary was not built from.
+BUILDINFO := $(ROOT)/.bin/.buildinfo
+$(shell mkdir -p $(ROOT)/.bin; printf '%s\n' '$(LDFLAGS)' | cmp -s - $(BUILDINFO) 2>/dev/null || printf '%s\n' '$(LDFLAGS)' > $(BUILDINFO))
 GOLANGCI  := $(ROOT)/.bin/golangci-lint
 GOTESTSUM := $(ROOT)/.bin/gotestsum
 # Only hangar's own sources. A bare find over $(ROOT) would also sweep up the
@@ -240,7 +247,7 @@ help: ## Show this help
 # Built beside the old binary and renamed over it: running workers execute this
 # file as their docker credential helper, and a push that runs it mid-copy
 # would fail. A rename swaps it in one step.
-$(BIN): $(GO) $(SRC) go.mod
+$(BIN): $(GO) $(SRC) go.mod $(BUILDINFO)
 	@mkdir -p $(dir $(BIN))
 	@$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN).new . && mv -f $(BIN).new $(BIN)
 

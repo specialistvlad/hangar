@@ -161,3 +161,9 @@ func TestNoReservedLabels(t *testing.T) {
 		}
 	}
 }
+
+func logsStart(n int, at time.Time) logs.Event {
+	return logs.Event{Worker: n, Kind: logs.KindJobStart, Text: "j", At: at}
+}
+
+func logsListening(n int) logs.Event { return logs.Event{Worker: n, Kind: logs.KindListening} }

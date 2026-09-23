@@ -98,8 +98,8 @@ func (f *Fleet) preflight() error { return nil }
 
 // plistPath is where hangar writes agents outside its own folder: launchd only
 // loads agents at login from ~/Library/LaunchAgents, and reboot survival is
-// worth that exception. The only other place is an opt-in WORKER_TMP_ROOT.
-// `make 0` removes both again.
+// worth that exception. The workers' agents go on `make 0`, the exporter's on
+// `make metrics-stop`. The only other place is an opt-in WORKER_TMP_ROOT.
 func (f *Fleet) plistPath(n int) string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", serviceName(n)+".plist")
@@ -147,12 +147,27 @@ func (f *Fleet) stopService(n int) {
 // loadedServices maps the index of every loaded hangar agent to its pid. An
 // error means launchd could not be asked — which is not the same as nothing
 // being loaded, and callers that decide something must tell the two apart.
+// Agents whose plist is on disk count too, at pid 0, so a kill still reaches
+// them when launchd cannot be asked.
 func loadedServices() (map[int]int, error) {
+	res := map[int]int{}
+	home, _ := os.UserHomeDir()
+	plists, _ := filepath.Glob(filepath.Join(home, "Library", "LaunchAgents", "com.hangar.w*.plist"))
+	for _, p := range plists {
+		if m := labelIndex.FindStringSubmatch(strings.TrimSuffix(filepath.Base(p), ".plist")); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				res[n] = 0
+			}
+		}
+	}
 	out, err := runTimeout(launchctlTimeout, "", "launchctl", "list")
 	if err != nil {
-		return map[int]int{}, fmt.Errorf("launchctl list: %v", err)
+		return res, fmt.Errorf("launchctl list: %v", err)
 	}
-	return parseLaunchctlList(out), nil
+	for n, pid := range parseLaunchctlList(out) {
+		res[n] = pid
+	}
+	return res, nil
 }
 
 // launchctlLine matches one `launchctl list` row: pid, last exit status,

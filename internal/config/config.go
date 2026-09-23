@@ -9,7 +9,6 @@ package config
 import (
 	"bufio"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -79,8 +78,8 @@ func Load(root string) (*Config, error) {
 		shares = append(shares, rel)
 	}
 	metricsAddr := or(env["METRICS_ADDR"], defaultMetricsAddr)
-	if _, _, err := net.SplitHostPort(metricsAddr); err != nil {
-		return nil, fmt.Errorf("METRICS_ADDR must be host:port, got %q", metricsAddr)
+	if err := checkListenAddr(metricsAddr); err != nil {
+		return nil, fmt.Errorf("METRICS_ADDR: %w", err)
 	}
 	tmpRoot := env["WORKER_TMP_ROOT"]
 	if tmpRoot != "" {

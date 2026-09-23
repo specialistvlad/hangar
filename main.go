@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -127,7 +128,6 @@ func run(args []string) error {
 		// Stops cleanly on the SIGTERM a service manager sends.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		logf(fmt.Sprintf("serving metrics on http://%s/metrics", cfg.MetricsAddr))
 		return exporter.Serve(ctx, f, cfg.MetricsAddr, version, commit)
 
 	case "metrics":
@@ -150,7 +150,12 @@ func metrics(f *fleet.Fleet, args []string) error {
 		if err := f.StartMetrics(); err != nil {
 			return err
 		}
-		logf(fmt.Sprintf("metrics exporter running: http://%s/metrics", f.Config().MetricsAddr))
+		addr := f.Config().MetricsAddr
+		if err := exporter.WaitServing(context.Background(), addr, version, commit, 15*time.Second); err != nil {
+			return fmt.Errorf("the exporter service started but is not serving %s: %v — its log, %s, says why; "+
+				"it keeps retrying until `make metrics-stop`", addr, err, filepath.Join(f.Config().LogsDir(), "metrics.log"))
+		}
+		logf(fmt.Sprintf("metrics exporter running: http://%s/metrics", addr))
 		return nil
 	case "stop":
 		f.StopMetrics()

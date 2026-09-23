@@ -39,6 +39,13 @@ positions rather than oversights:
 - **The runner identity RSA key is plaintext.** That is how GitHub's own runner
   stores it on macOS and Linux; only Windows gets DPAPI. It is identical on a
   hand-installed runner.
+- **The metrics exporter is unauthenticated plain HTTP.** `make metrics` serves
+  the fleet's state — repositories, workflows, job names and run ids — on
+  `127.0.0.1:9151` by default. Loopback keeps it off the network, not away from
+  other accounts on the same machine. On a shared host, restrict it to the
+  scraper's account (for example an nftables `meta skuid` rule), put an
+  authenticating proxy in front, or leave it stopped. It never serves `GH_TOKEN`,
+  registry credentials or anything from a job's environment.
 - **Workers share one Docker daemon and its BuildKit cache.** That shared cache
   is the reason to build locally at all. A job that can reach the daemon can
   reach the host — self-hosted runners are not a sandbox, which is why GitHub

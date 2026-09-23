@@ -123,8 +123,9 @@ func (f *Fleet) checkDockerAccess(username string) error {
 }
 
 // userUnitDir is where hangar writes units outside its own folder on Linux:
-// the user manager loads them from there and nowhere under the repo. The only
-// other place is an opt-in WORKER_TMP_ROOT. `make 0` removes both again.
+// the user manager loads them from there and nowhere under the repo. It holds
+// the workers' units, which `make 0` removes, and the exporter's, which
+// `make metrics-stop` does. The only other place is an opt-in WORKER_TMP_ROOT.
 func userUnitDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
