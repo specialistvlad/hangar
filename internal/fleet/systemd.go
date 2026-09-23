@@ -213,9 +213,18 @@ func systemctl(timeout time.Duration, args ...string) (string, error) {
 }
 
 // userCmd runs a tool that talks to the calling user's service manager.
-// XDG_RUNTIME_DIR is always set from the uid rather than inherited: `sudo -iu`
-// and cron both start without it, and without it the manager cannot be found.
+// XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are always set from the uid
+// rather than inherited: `sudo -iu` and cron both start without either, and
+// without XDG_RUNTIME_DIR the manager cannot be found at all. A bus address
+// left over from whoever's shell hangar was started under — plain `su`
+// preserves it, unlike the `sudo -iu` the README documents — would otherwise
+// take precedence over the one XDG_RUNTIME_DIR implies, and point at some
+// other account's bus.
 func userCmd(timeout time.Duration, name string, args ...string) (string, error) {
-	env := []string{fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", os.Getuid())}
+	uid := os.Getuid()
+	env := []string{
+		fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", uid),
+		fmt.Sprintf("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%d/bus", uid),
+	}
 	return runEnv(timeout, "", env, name, args...)
 }

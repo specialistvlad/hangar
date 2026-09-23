@@ -3,10 +3,33 @@
 package fleet
 
 import (
+	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+// userCmd must hand every command its own XDG_RUNTIME_DIR and
+// DBUS_SESSION_BUS_ADDRESS, derived from the uid, regardless of what either
+// was set to in hangar's own environment — the case a stale inherited bus
+// address (e.g. from a plain `su` rather than `sudo -iu`) would otherwise slip
+// through as.
+func TestUserCmdSetsRuntimeAndBusFromUID(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/0")
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/0/bus")
+
+	out, err := userCmd(5*time.Second, "sh", "-c", `printf '%s %s' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := os.Getuid()
+	want := fmt.Sprintf("/run/user/%d unix:path=/run/user/%d/bus", uid, uid)
+	if out != want {
+		t.Errorf("userCmd env = %q, want %q", out, want)
+	}
+}
 
 // The unit is what keeps a worker alive across crashes, logouts and reboots, so
 // the settings that do that are pinned here rather than trusted to survive an
