@@ -89,7 +89,7 @@ func (c *Collector) SetFleet(ws []fleet.Worker) {
 		w.runner = fw.Name
 		w.up = fw.Registered && fw.Running
 		if !w.up {
-			w.idle()
+			w.notUp()
 		}
 	}
 	for n := range c.workers {
@@ -118,7 +118,7 @@ func (c *Collector) Apply(e logs.Event) {
 		if !e.Recovered {
 			r := resultOf(e.Result)
 			w.jobs[r]++
-			if w.busy && !w.start.IsZero() && !at.Before(w.start) {
+			if !w.start.IsZero() && !at.Before(w.start) {
 				c.durations.observe(r, at.Sub(w.start).Seconds())
 			}
 		}
@@ -134,6 +134,18 @@ func (c *Collector) Apply(e logs.Event) {
 // that is no longer running, has no job, whether or not it logged an end.
 func (w *workerState) idle() {
 	w.busy, w.job, w.start = false, "", time.Time{}
+	w.info, w.infoOK, w.tries = logs.JobInfo{}, false, 0
+}
+
+// notUp clears a worker's dashboard-facing busy state when the supervisor
+// reports it as not running. The job's start stays in place: a worker can go
+// briefly "not up" mid-job (a restart under Restart=always or KeepAlive)
+// without losing the timestamp its eventual KindJobEnd needs, so
+// hangar_jobs_total and hangar_job_duration_seconds keep counting the same
+// set of live job ends. Only that job's own end, a new start, or a
+// KindListening transition clears it.
+func (w *workerState) notUp() {
+	w.busy, w.job = false, ""
 	w.info, w.infoOK, w.tries = logs.JobInfo{}, false, 0
 }
 

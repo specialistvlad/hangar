@@ -102,6 +102,27 @@ func TestRecoveredTransitionsAreNotCounted(t *testing.T) {
 	mustHave(t, render(c), `hangar_worker_busy{worker="w3",runner="w"} 1`)
 }
 
+// A worker can go briefly "not up" mid-job — a restart under Restart=always
+// or KeepAlive — while the job it started keeps running. hangar_jobs_total
+// and hangar_job_duration_seconds_count must still move together for that
+// job's real end, not just the counter.
+func TestJobEndAfterTransientDown(t *testing.T) {
+	c := NewCollector("v", "c")
+	c.SetFleet([]fleet.Worker{{Index: 1, Name: "w", Registered: true, Running: true}})
+	start := time.Unix(1000, 0)
+	c.Apply(logsStart(1, start))
+
+	c.SetFleet([]fleet.Worker{{Index: 1, Name: "w", Registered: false, Running: false}})
+	mustHave(t, render(c), `hangar_worker_busy{worker="w1",runner="w"} 0`)
+
+	c.Apply(logs.Event{Worker: 1, Kind: logs.KindJobEnd, Result: "Succeeded", At: start.Add(30 * time.Second)})
+	mustHave(t, render(c),
+		`hangar_jobs_total{worker="w1",runner="w",result="succeeded"} 1`,
+		`hangar_job_duration_seconds_count{result="succeeded"} 1`,
+		`hangar_job_duration_seconds_sum{result="succeeded"} 30`,
+	)
+}
+
 func TestResultOf(t *testing.T) {
 	for in, want := range map[string]string{
 		"Succeeded": "succeeded", "SucceededWithIssues": "succeeded",
