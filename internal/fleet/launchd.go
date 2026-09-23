@@ -111,12 +111,18 @@ func (f *Fleet) plistPath(n int) string {
 
 func (f *Fleet) domain() string { return fmt.Sprintf("gui/%d", os.Getuid()) }
 
-// startService writes worker n's launchd agent and loads it.
+// startService writes worker n's launchd agent and loads it. A plist already
+// at that name belonging to a different checkout of this repository sharing
+// the account is left alone: see foreignUnitRoot.
 func (f *Fleet) startService(n int) error {
 	dir := f.cfg.WorkerDir(n)
 	path := f.plistPath(n)
 	if err := installRunsvc(dir); err != nil {
 		return err
+	}
+	if other, ok := foreignUnitRoot(path, f.cfg.WorkersDir()); ok {
+		return fmt.Errorf("%s already belongs to the checkout at %s — stop it there (`make kill` or "+
+			"`make 0`) before this checkout uses worker %d", serviceName(n), other, n)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -142,34 +148,43 @@ func (f *Fleet) startService(n int) error {
 	return nil
 }
 
-// stopService unloads worker n's agent and removes its plist.
+// stopService unloads worker n's agent and removes its plist. A plist
+// belonging to a different checkout of this repository sharing the account
+// is left alone — not booted out, not removed: see foreignUnitRoot.
 func (f *Fleet) stopService(n int) {
+	path := f.plistPath(n)
+	if _, ok := foreignUnitRoot(path, f.cfg.WorkersDir()); ok {
+		return
+	}
 	_, _ = runTimeout(launchctlTimeout, "", "launchctl", "bootout", f.domain()+"/"+serviceName(n))
-	_ = os.Remove(f.plistPath(n))
+	_ = os.Remove(path)
 }
 
-// loadedServices maps the index of every loaded hangar agent to its pid. An
-// error means launchd could not be asked — which is not the same as nothing
-// being loaded, and callers that decide something must tell the two apart.
-// Agents whose plist is on disk count too, at pid 0, so a kill still reaches
-// them when launchd cannot be asked.
-func loadedServices() (map[int]int, error) {
+// loadedServices maps the index of every agent belonging to this checkout —
+// its WorkingDirectory under workersDir — to its pid. An error means launchd
+// could not be asked — which is not the same as nothing being loaded, and
+// callers that decide something must tell the two apart. An agent whose
+// plist is on disk and is this checkout's counts too, at pid 0, so a kill
+// still reaches it when launchd cannot be asked; one whose plist has no file
+// left to check ownership against stays in scope the same way, since there is
+// nothing to tell it apart from this checkout's own. An agent whose plist
+// belongs to a different checkout is left out entirely, even when launchd
+// reports it loaded.
+func loadedServices(workersDir string) (map[int]int, error) {
 	res := map[int]int{}
 	home, _ := os.UserHomeDir()
-	plists, _ := filepath.Glob(filepath.Join(home, "Library", "LaunchAgents", "com.hangar.w*.plist"))
-	for _, p := range plists {
-		if m := labelIndex.FindStringSubmatch(strings.TrimSuffix(filepath.Base(p), ".plist")); m != nil {
-			if n, err := strconv.Atoi(m[1]); err == nil {
-				res[n] = 0
-			}
-		}
+	own, foreign := ownAgents(filepath.Join(home, "Library", "LaunchAgents"), workersDir)
+	for n := range own {
+		res[n] = 0
 	}
 	out, err := runTimeout(launchctlTimeout, "", "launchctl", "list")
 	if err != nil {
 		return res, fmt.Errorf("launchctl list: %v", err)
 	}
 	for n, pid := range parseLaunchctlList(out) {
-		res[n] = pid
+		if !foreign[n] {
+			res[n] = pid
+		}
 	}
 	return res, nil
 }

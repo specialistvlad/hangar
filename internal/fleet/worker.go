@@ -33,14 +33,14 @@ type Worker struct {
 // List reports the workers that exist on disk. The directories are the state:
 // there is no separate registry file that could drift out of sync with them.
 func (f *Fleet) List() []Worker {
-	loaded, _ := loadedServices() // for display: a failed listing shows workers as stopped
+	loaded, _ := loadedServices(f.cfg.WorkersDir()) // for display: a failed listing shows workers as stopped
 	return f.list(loaded)
 }
 
 // ListChecked is List for a caller that must tell "stopped" from "could not
 // ask the supervisor": the workers on disk come back either way.
 func (f *Fleet) ListChecked() ([]Worker, error) {
-	loaded, err := loadedServices()
+	loaded, err := loadedServices(f.cfg.WorkersDir())
 	return f.list(loaded), err
 }
 

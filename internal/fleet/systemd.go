@@ -3,10 +3,8 @@
 package fleet
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -50,78 +48,6 @@ func (f *Fleet) preflight() error {
 	return f.checkDockerAccess(u.Username)
 }
 
-// supervisorReady checks what every hangar service needs from systemd: a user
-// manager that runs at boot and can be reached.
-func (f *Fleet) supervisorReady() error {
-	u, err := user.Current()
-	if err != nil {
-		return err
-	}
-	// Without lingering the user manager — and every worker with it — stops at
-	// the last logout and does not start at boot.
-	if _, err := os.Stat(filepath.Join(lingerDir, u.Username)); err != nil {
-		return fmt.Errorf("lingering is off for %s, so its workers would stop at logout and "+
-			"never start at boot — enable it once with: sudo loginctl enable-linger %s", u.Username, u.Username)
-	}
-	if out, err := systemctl(systemctlTimeout, "show", "--property=Version"); err != nil {
-		return fmt.Errorf("cannot reach %s's systemd user manager: %v: %s", u.Username, err, strings.TrimSpace(out))
-	}
-	return nil
-}
-
-// checkDockerAccess asks the user manager itself whether it can open the
-// docker socket, because a unit gets the manager's groups, not the ones
-// /etc/group lists now. A manager started before `usermod -aG docker` never
-// gains the group — and with lingering on, logging out and back in does not
-// restart it — so every docker step in every job would fail while the workers
-// look healthy.
-//
-// The probe runs through systemd-run with the shell's own `test`: the
-// uutils coreutils some distributions ship answer -w wrongly for a socket
-// that is writable through a group. The path travels in the environment, so
-// no quoting or $-expansion can change it. It is a oneshot started without
-// --wait: systemd-run still waits for a oneshot to finish and reports its exit,
-// but only --wait needs the user's session D-Bus, which a minimal server may
-// not have and nothing else in hangar needs.
-func (f *Fleet) checkDockerAccess(username string) error {
-	sock, ok := strings.CutPrefix(f.cfg.DockerHost, "unix://")
-	if !ok || sock == "" {
-		return nil
-	}
-	// No daemon at all is for the jobs to report; it is not a stale session.
-	if _, err := os.Stat(sock); err != nil {
-		return nil
-	}
-	out, err := userCmd(systemctlTimeout, "systemd-run", "--user", "--quiet", "--collect",
-		"--property=Type=oneshot", "--setenv=HANGAR_PROBE="+sock, "--",
-		"/bin/sh", "-c", `test -r "$HANGAR_PROBE" && test -w "$HANGAR_PROBE"`)
-	if err == nil {
-		return nil
-	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() == 1 && strings.TrimSpace(out) == "" {
-		return dockerAccessErr(username, sock, os.Getuid())
-	}
-	return fmt.Errorf("could not check docker access through the user manager: %v: %s", err, strings.TrimSpace(out))
-}
-
-// dockerAccessErr explains why the user manager cannot reach docker and how
-// to fix it — and what that fix costs: restarting the manager is the only way
-// to hand it a group it did not start with, but the restart stops every unit
-// it runs, not only the worker whose provision hit this check. On a fleet
-// that is already up, that includes every other worker and the exporter,
-// with any job they are running mid-way through.
-func dockerAccessErr(username, sock string, uid int) error {
-	return fmt.Errorf("%s's systemd user manager cannot open %s, so every docker step in a job "+
-		"would fail. A running manager keeps the groups it started with: after adding %s to the "+
-		"socket's group, restart it with `sudo systemctl restart user@%d.service` or reboot — "+
-		"logging out and back in is not enough while lingering is on. That restart stops every "+
-		"unit this manager runs, not just the worker being added — every other hangar-wN.service "+
-		"and hangar-metrics.service, including any job they are mid-way through — so on a fleet "+
-		"that is already up, wait until no worker is busy, or run `make 0` first",
-		username, sock, username, uid)
-}
-
 // userUnitDir is where hangar writes units outside its own folder on Linux:
 // the user manager loads them from there and nowhere under the repo. It holds
 // the workers' units, which `make 0` removes, and the exporter's, which
@@ -134,7 +60,9 @@ func userUnitDir() (string, error) {
 	return filepath.Join(home, ".config", "systemd", "user"), nil
 }
 
-// startService writes worker n's unit, enables it for boot and starts it.
+// startService writes worker n's unit, enables it for boot and starts it. A
+// unit already at that name belonging to a different checkout of this
+// repository sharing the account is left alone: see foreignUnitRoot.
 func (f *Fleet) startService(n int) error {
 	if err := installRunsvc(f.cfg.WorkerDir(n)); err != nil {
 		return err
@@ -146,6 +74,11 @@ func (f *Fleet) startService(n int) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	path := filepath.Join(dir, serviceName(n))
+	if other, ok := foreignUnitRoot(path, f.cfg.WorkersDir()); ok {
+		return fmt.Errorf("%s already belongs to the checkout at %s — stop it there (`make kill` or "+
+			"`make 0`) before this checkout uses worker %d", serviceName(n), other, n)
+	}
 	body := renderUnit(unitSpec{
 		Worker: n,
 		Name:   f.cfg.WorkerName(n),
@@ -154,7 +87,7 @@ func (f *Fleet) startService(n int) error {
 		Stdout: filepath.Join(f.cfg.LogsDir(), fmt.Sprintf("w%d.out", n)),
 		Stderr: filepath.Join(f.cfg.LogsDir(), fmt.Sprintf("w%d.err", n)),
 	})
-	if err := os.WriteFile(filepath.Join(dir, serviceName(n)), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return err
 	}
 
@@ -172,9 +105,19 @@ func (f *Fleet) startService(n int) error {
 
 // stopService stops and disables worker n's unit and removes its file. Every
 // step is best-effort, so a kill still clears what it can when the user
-// manager is unreachable.
+// manager is unreachable. A unit belonging to a different checkout of this
+// repository sharing the account is left alone — not stopped, not
+// disabled, not removed: see foreignUnitRoot.
 func (f *Fleet) stopService(n int) {
 	name := serviceName(n)
+	dir, err := userUnitDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(dir, name)
+	if _, ok := foreignUnitRoot(path, f.cfg.WorkersDir()); ok {
+		return
+	}
 	_, _ = systemctl(stopTimeout, "disable", "--now", name)
 	// KillMode=process — the vendor's choice, kept so a runner self-update can
 	// outlive the listener — makes a stop signal only the main process. Whatever
@@ -182,32 +125,35 @@ func (f *Fleet) stopService(n int) {
 	// directory is deleted from under it.
 	_, _ = systemctl(systemctlTimeout, "kill", "--signal=SIGKILL", name)
 
-	if dir, err := userUnitDir(); err == nil {
-		_ = os.Remove(filepath.Join(dir, name))
-		// disable removes this link itself; clearing it by hand covers the case
-		// where it could not run, so the next boot has no dangling want.
-		_ = os.Remove(filepath.Join(dir, "default.target.wants", name))
-	}
+	_ = os.Remove(path)
+	// disable removes this link itself; clearing it by hand covers the case
+	// where it could not run, so the next boot has no dangling want.
+	_ = os.Remove(filepath.Join(dir, "default.target.wants", name))
 	reloadMu.Lock()
 	_, _ = systemctl(systemctlTimeout, "daemon-reload")
 	reloadMu.Unlock()
 	_, _ = systemctl(systemctlTimeout, "reset-failed", name)
 }
 
-// loadedServices maps the index of every hangar unit to its main pid, 0 when
-// it is not running. A unit counts if its file exists or the manager still has
-// it loaded, so a kill reaches both halves even when they disagree. An error
-// means the manager could not be asked; the file-based entries still come back.
-func loadedServices() (map[int]int, error) {
+// loadedServices maps the index of every unit belonging to this checkout —
+// its WorkingDirectory under workersDir — to its main pid, 0 when it is not
+// running. A unit counts if its file exists and is this checkout's, or the
+// manager still has it loaded under a name with no file left to check
+// ownership against, which stays in scope as it always has: there is nothing
+// to tell it apart from this checkout's own. A unit whose file belongs to a
+// different checkout is left out entirely, even when the manager reports it
+// loaded, so a kill or a scale never reaches it. An error means the manager
+// could not be asked; the file-based entries still come back.
+func loadedServices(workersDir string) (map[int]int, error) {
 	res := map[int]int{}
+	foreign := map[int]bool{}
 	var names []string
 	if dir, err := userUnitDir(); err == nil {
-		files, _ := filepath.Glob(filepath.Join(dir, unitPrefix+"*.service"))
-		for _, file := range files {
-			if n, ok := unitIndex(filepath.Base(file)); ok {
-				res[n] = 0
-				names = append(names, filepath.Base(file))
-			}
+		var own map[int]string
+		own, foreign = ownUnitFiles(dir, workersDir)
+		for n, name := range own {
+			res[n] = 0
+			names = append(names, name)
 		}
 	}
 	args := append([]string{"show", "--property=Id,MainPID", unitPrefix + "*.service"}, names...)
@@ -216,7 +162,9 @@ func loadedServices() (map[int]int, error) {
 		return res, fmt.Errorf("systemctl --user show: %v: %s", err, strings.TrimSpace(out))
 	}
 	for n, pid := range parseShow(out) {
-		res[n] = pid
+		if !foreign[n] {
+			res[n] = pid
+		}
 	}
 	return res, nil
 }

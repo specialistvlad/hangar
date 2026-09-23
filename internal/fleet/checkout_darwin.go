@@ -6,6 +6,9 @@ import (
 	"bytes"
 	"encoding/xml"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // unitWorkingDir reads a plist's WorkingDirectory — present in every agent
@@ -77,4 +80,46 @@ func plistText(dec *xml.Decoder) string {
 		return ""
 	}
 	return string(cd)
+}
+
+// foreignUnitRoot reports the checkout root recorded in the worker plist
+// already at path when it is not, or is not beneath, workersDir: startService
+// must never write over or reload such a plist, since doing so would
+// silently take over a fleet that is not this checkout's. ok is false when
+// there is nothing to protect — no plist yet, or one this checkout already
+// wrote.
+func foreignUnitRoot(path, workersDir string) (string, bool) {
+	dir, ok := unitWorkingDir(path)
+	if !ok || underDir(dir, workersDir) {
+		return "", false
+	}
+	// dir is <root>/workers/wN; walking up twice recovers <root>.
+	return filepath.Dir(filepath.Dir(dir)), true
+}
+
+// ownAgents globs dir for hangar's worker agents and splits their indexes
+// into this checkout's own — a plist whose WorkingDirectory falls under
+// workersDir — and another checkout's, before loadedServices ever asks
+// launchd about them. An agent launchd still has loaded whose plist is gone
+// carries no signal to split on, so it is in neither map, which is exactly
+// what leaves it in scope for loadedServices as it always has been.
+func ownAgents(dir, workersDir string) (own map[int]bool, foreign map[int]bool) {
+	own, foreign = map[int]bool{}, map[int]bool{}
+	plists, _ := filepath.Glob(filepath.Join(dir, "com.hangar.w*.plist"))
+	for _, p := range plists {
+		m := labelIndex.FindStringSubmatch(strings.TrimSuffix(filepath.Base(p), ".plist"))
+		if m == nil {
+			continue
+		}
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		if _, ok := foreignUnitRoot(p, workersDir); ok {
+			foreign[n] = true
+			continue
+		}
+		own[n] = true
+	}
+	return own, foreign
 }

@@ -13,7 +13,7 @@ var _ = hangarRunsOnlyOnMacOSAndLinux
 func (f *Fleet) preflight() error                          { return nil }
 func (f *Fleet) startService(int) error                    { return nil }
 func (f *Fleet) stopService(int)                           {}
-func loadedServices() (map[int]int, error)                 { return nil, nil }
+func loadedServices(string) (map[int]int, error)           { return nil, nil }
 func ownedByMe(fs.FileInfo) bool                           { return false }
 func lockScale(string, func(string), bool) (func(), error) { return func() {}, nil }
 

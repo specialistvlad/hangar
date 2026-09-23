@@ -4,6 +4,7 @@ package fleet
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -54,4 +55,42 @@ func unitSetting(path, prefix string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// foreignUnitRoot reports the checkout root recorded in the worker unit
+// already at path when it is not, or is not beneath, workersDir: startService
+// must never write over or restart such a unit, since doing so would
+// silently take over a fleet that is not this checkout's. ok is false when
+// there is nothing to protect — no unit yet, or one this checkout already
+// wrote.
+func foreignUnitRoot(path, workersDir string) (string, bool) {
+	dir, ok := unitWorkingDir(path)
+	if !ok || underDir(dir, workersDir) {
+		return "", false
+	}
+	// dir is <root>/workers/wN; walking up twice recovers <root>.
+	return filepath.Dir(filepath.Dir(dir)), true
+}
+
+// ownUnitFiles globs dir for hangar's worker units and splits their indexes
+// into this checkout's own — a file whose WorkingDirectory falls under
+// workersDir — and another checkout's, before loadedServices ever asks
+// systemd about them. A unit systemd still has loaded whose file is gone
+// carries no signal to split on, so it is in neither map, which is exactly
+// what leaves it in scope for loadedServices as it always has been.
+func ownUnitFiles(dir, workersDir string) (own map[int]string, foreign map[int]bool) {
+	own, foreign = map[int]string{}, map[int]bool{}
+	files, _ := filepath.Glob(filepath.Join(dir, unitPrefix+"*.service"))
+	for _, file := range files {
+		n, ok := unitIndex(filepath.Base(file))
+		if !ok {
+			continue
+		}
+		if _, ok := foreignUnitRoot(file, workersDir); ok {
+			foreign[n] = true
+			continue
+		}
+		own[n] = filepath.Base(file)
+	}
+	return own, foreign
 }

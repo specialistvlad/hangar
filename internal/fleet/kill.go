@@ -50,7 +50,7 @@ func (f *Fleet) Kill(progress func(string)) int {
 	} else if err == nil {
 		unlock()
 	}
-	loaded, err := loadedServices()
+	loaded, err := loadedServices(f.cfg.WorkersDir())
 	if err != nil {
 		progress(fmt.Sprintf("warning: %v — killing what is on disk and in the service definitions", err))
 	}
