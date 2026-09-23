@@ -109,6 +109,25 @@ MainPID=11
 	}
 }
 
+// The restart checkDockerAccess suggests stops every unit the user manager
+// runs, not only the worker whose provision hit the check, so the message
+// must say that before an operator copies the command onto a live fleet.
+func TestDockerAccessErrWarnsAboutTheWholeFleet(t *testing.T) {
+	err := dockerAccessErr("hangar", "/var/run/docker.sock", 1001)
+	for _, want := range []string{
+		"sudo systemctl restart user@1001.service",
+		"stops every unit this manager runs",
+		"hangar-wN.service",
+		"hangar-metrics.service",
+		"wait until no worker is busy",
+		"make 0",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("dockerAccessErr missing %q\n%s", want, err)
+		}
+	}
+}
+
 func TestUnitIndex(t *testing.T) {
 	if n, ok := unitIndex(serviceName(12)); !ok || n != 12 {
 		t.Errorf("serviceName(12) = %q does not parse back to 12", serviceName(12))

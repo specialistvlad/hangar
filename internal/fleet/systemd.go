@@ -100,12 +100,26 @@ func (f *Fleet) checkDockerAccess(username string) error {
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 1 && strings.TrimSpace(out) == "" {
-		return fmt.Errorf("%s's systemd user manager cannot open %s, so every docker step in a job "+
-			"would fail. A running manager keeps the groups it started with: after adding %s to the "+
-			"socket's group, restart it with `sudo systemctl restart user@%d.service` or reboot — "+
-			"logging out and back in is not enough while lingering is on", username, sock, username, os.Getuid())
+		return dockerAccessErr(username, sock, os.Getuid())
 	}
 	return fmt.Errorf("could not check docker access through the user manager: %v: %s", err, strings.TrimSpace(out))
+}
+
+// dockerAccessErr explains why the user manager cannot reach docker and how
+// to fix it — and what that fix costs: restarting the manager is the only way
+// to hand it a group it did not start with, but the restart stops every unit
+// it runs, not only the worker whose provision hit this check. On a fleet
+// that is already up, that includes every other worker and the exporter,
+// with any job they are running mid-way through.
+func dockerAccessErr(username, sock string, uid int) error {
+	return fmt.Errorf("%s's systemd user manager cannot open %s, so every docker step in a job "+
+		"would fail. A running manager keeps the groups it started with: after adding %s to the "+
+		"socket's group, restart it with `sudo systemctl restart user@%d.service` or reboot — "+
+		"logging out and back in is not enough while lingering is on. That restart stops every "+
+		"unit this manager runs, not just the worker being added — every other hangar-wN.service "+
+		"and hangar-metrics.service, including any job they are mid-way through — so on a fleet "+
+		"that is already up, wait until no worker is busy, or run `make 0` first",
+		username, sock, username, uid)
 }
 
 // userUnitDir is where hangar writes units outside its own folder on Linux:
