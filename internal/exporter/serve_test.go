@@ -18,8 +18,9 @@ import (
 
 // The whole loop against a real directory: a job start written to a worker's
 // runner log shows up as busy, a failed listing leaves the workers as they
-// were, a worker that leaves the listing takes its series with it, and the
-// server answers only /metrics and / and stops when told.
+// were and keeps following their logs so a job that runs entirely during the
+// outage is still counted, a worker that leaves the listing takes its series
+// with it, and the server answers only /metrics and / and stops when told.
 func TestServeLoop(t *testing.T) {
 	root := t.TempDir()
 	dir := func(n int) string { return filepath.Join(root, "workers", "w"+string(rune('0'+n))) }
@@ -82,14 +83,32 @@ func TestServeLoop(t *testing.T) {
 		return strings.Contains(b, `hangar_worker_busy{worker="w1",runner="box-w1"} 1`)
 	})
 
+	// A ReadDir failure inside ListChecked comes back as (nil, err), the same
+	// shape this mock takes here: no workers, not zero workers.
 	mu.Lock()
 	listErr = errors.New("systemctl: timeout")
-	listing = []fleet.Worker{{Index: 1, Name: "box-w1", Dir: dir(1), Registered: true, Running: false}}
+	listing = nil
 	mu.Unlock()
 	time.Sleep(100 * time.Millisecond)
 	if body, _ := scrape(); !strings.Contains(body, `hangar_worker_up{worker="w1",runner="box-w1"} 1`) {
 		t.Errorf("a failed listing must leave the worker as it was:\n%s", body)
 	}
+
+	// A job that starts and finishes while the listing keeps failing must
+	// still be counted: the log watcher started before the outage has to
+	// keep running rather than being torn down on every failed poll.
+	end := "[2026-09-23 03:00:05Z INFO Terminal] WRITE LINE: 2026-09-23 03:00:05Z: Job a / build completed with result: Succeeded\n"
+	f, err := os.OpenFile(filepath.Join(dir(1), "_diag", "Runner_1.log"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(end); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	eventually("the job counted while the listing was still failing", func(b string) bool {
+		return strings.Contains(b, `hangar_jobs_total{worker="w1",runner="box-w1",result="succeeded"} 1`)
+	})
 
 	mu.Lock()
 	listErr, listing = nil, nil

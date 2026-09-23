@@ -68,15 +68,17 @@ func serve(ctx context.Context, ln net.Listener, c *Collector, list func() ([]fl
 	defer tick.Stop()
 	for {
 		// A listing the supervisor could not answer says nothing about which
-		// workers are up; the previous state stands until the next poll. The
+		// workers are up; the previous state stands until the next poll, and
+		// so do that poll's watchers, so a job that starts and finishes
+		// entirely during the outage is still followed rather than lost. The
 		// outcome is still recorded either way, so a supervisor that keeps
 		// failing shows up in the metrics instead of only freezing the state.
 		ws, err := list()
 		c.ObserveListing(err)
 		if err == nil {
 			c.SetFleet(ws)
+			follow(ctx, ws, watching, events)
 		}
-		follow(ctx, ws, watching, events)
 		for n, p := range c.PendingInfo() {
 			info, path, ok := logs.FindJobInfo(workerDir(n), p.Start, p.LogPath)
 			c.SetJobInfo(n, p.Start, info, path, ok)
