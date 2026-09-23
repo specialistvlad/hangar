@@ -19,7 +19,11 @@ func (m *Model) apply(e logs.Event) {
 	}
 	switch e.Kind {
 	case logs.KindJobStart:
-		w.Job, w.Busy, w.Since, w.LastResult = e.Text, true, time.Now(), ""
+		since := e.At
+		if since.IsZero() {
+			since = time.Now()
+		}
+		w.Job, w.Busy, w.Since, w.LastResult = e.Text, true, since, ""
 	case logs.KindJobEnd:
 		w.Busy, w.Job, w.LastResult = false, "", e.Result
 	case logs.KindListening:
