@@ -132,6 +132,23 @@ func TestListCheckedReportsAnUnreadableWorkersDir(t *testing.T) {
 	}
 }
 
+// provision reports whether it started the worker's service, not merely
+// whether it returned without error, so a caller whose only failure came
+// after that — the marker write — knows the worker is already running and
+// must not be stopped. A failure before startService, such as a tarball that
+// does not exist, never reaches the real supervisor and must report
+// started=false.
+func TestProvisionReportsNotStartedBeforeTheServiceStarts(t *testing.T) {
+	f := New(&config.Config{Root: t.TempDir(), NamePrefix: "t-w"})
+	started, err := f.provision(1, filepath.Join(t.TempDir(), "missing.tar.gz"), "tok", func(string) {})
+	if err == nil {
+		t.Fatal("a missing tarball must fail provision")
+	}
+	if started {
+		t.Error("started = true, want false: the failure was before startService ever ran")
+	}
+}
+
 // The scale lock is held per open file: a second scale waits, or with TryScale
 // is told to try again.
 func TestLockScale(t *testing.T) {

@@ -115,11 +115,17 @@ func (f *Fleet) scale(n int, progress func(string), wait bool) error {
 		return err
 	}
 	return each(add, func(i int) error {
-		err := f.provision(i, tarball, token, progress)
+		started, err := f.provision(i, tarball, token, progress)
 		if err == nil {
 			return nil
 		}
-		f.stopService(i)
+		// A worker whose service already started is left running: migrateMarkers
+		// backfills its marker on the next scale, the same trust it already gives
+		// a pre-existing worker in this state. Stopping it here over a failure as
+		// late as the marker write would kill an otherwise healthy worker.
+		if !started {
+			f.stopService(i)
+		}
 		// A worker GitHub already accepted is left on disk, so `make 0` can still
 		// unregister it and the next scale completes it in place. One that never
 		// registered holds nothing worth keeping.
@@ -136,26 +142,29 @@ func (f *Fleet) scale(n int, progress func(string), wait bool) error {
 // provision unpacks, registers and starts one worker — or, for a worker an
 // earlier pass registered but did not finish, just the steps after
 // registration: running config.sh again would fail with "already configured".
-func (f *Fleet) provision(n int, tarball, token string, progress func(string)) error {
+// It reports whether startService succeeded, so a caller that sees a later
+// error — the marker write is the only step left after that — knows the
+// worker is already live and must not be stopped.
+func (f *Fleet) provision(n int, tarball, token string, progress func(string)) (started bool, err error) {
 	dir := f.cfg.WorkerDir(n)
 	progress(fmt.Sprintf("creating %s", f.cfg.WorkerName(n)))
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return false, err
 	}
 	// Anything that can fail about the worker's TMPDIR fails here, before
 	// GitHub knows the worker exists.
 	if err := f.prepareTmp(n); err != nil {
-		return err
+		return false, err
 	}
 	if !exists(filepath.Join(dir, ".runner")) {
 		// The system tar rather than archive/tar: the runner ships symlinks and
 		// execute bits that the stdlib reader would need hand-rolled handling for.
 		if out, err := run(dir, "tar", "xzf", tarball); err != nil {
-			return fmt.Errorf("extract: %v: %s", err, out)
+			return false, fmt.Errorf("extract: %v: %s", err, out)
 		}
 		if out, err := runSecret(dir, tokenEnv(token), "./config.sh", f.registerArgs(n)...); err != nil {
-			return fmt.Errorf("register: %v: %s", err, out)
+			return false, fmt.Errorf("register: %v: %s", err, out)
 		}
 	}
 	// Both of these must follow registration, not precede it. config.sh runs the
@@ -164,15 +173,15 @@ func (f *Fleet) provision(n int, tarball, token string, progress func(string)) e
 	// environment. Writing ours afterwards is what keeps a worker deterministic
 	// rather than a snapshot of whoever ran `make`.
 	if err := f.writeIsolation(n); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".path"), []byte(f.runnerPath(n)+"\n"), 0o644); err != nil {
-		return err
+		return false, err
 	}
 	if err := f.startService(n); err != nil {
-		return err
+		return false, err
 	}
-	return os.WriteFile(filepath.Join(dir, readyMarker), nil, 0o644)
+	return true, os.WriteFile(filepath.Join(dir, readyMarker), nil, 0o644)
 }
 
 // tokenEnv passes a short-lived runner token to config.sh out of band. See
