@@ -77,23 +77,29 @@ func (f *Fleet) StartMetrics() error {
 	return nil
 }
 
-// StopMetrics stops and removes the exporter's service. Best-effort, like
-// stopping a worker — except for a service that belongs to a different
-// checkout of this repository sharing the account, which it leaves running
-// and says so, rather than stopping another checkout's exporter out from
-// under it.
+// StopMetrics stops and removes the exporter's service. Every systemctl
+// step is unconditional and best-effort, like stopping a worker — only the
+// foreign-checkout ownership check and the unit file removal, which both
+// need the unit directory, are skipped when userUnitDir() cannot resolve
+// it, the same tolerance MetricsRunning already gives that failure. A
+// service that belongs to a different checkout of this repository sharing
+// the account is left running rather than stopped out from under it.
 func (f *Fleet) StopMetrics() error {
-	dir, err := userUnitDir()
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(dir, metricsUnit)
-	if other, ok := foreignMetricsRoot(path, f.cfg.Root); ok {
-		return fmt.Errorf("%s belongs to the checkout at %s — leaving it running; stop it from there with `make metrics-stop`", metricsUnit, other)
+	dir, dirErr := userUnitDir()
+	var path string
+	if dirErr == nil {
+		path = filepath.Join(dir, metricsUnit)
+		if other, ok := foreignMetricsRoot(path, f.cfg.Root); ok {
+			return fmt.Errorf("%s belongs to the checkout at %s — leaving it running; stop it from there with `make metrics-stop`", metricsUnit, other)
+		}
 	}
 	_, _ = systemctl(systemctlTimeout, "disable", "--now", metricsUnit)
-	_ = os.Remove(path)
-	_ = os.Remove(filepath.Join(dir, "default.target.wants", metricsUnit))
+	if dirErr == nil {
+		_ = os.Remove(path)
+		// disable removes this link itself; clearing it by hand covers the case
+		// where it could not run, so the next boot has no dangling want.
+		_ = os.Remove(filepath.Join(dir, "default.target.wants", metricsUnit))
+	}
 	reloadMu.Lock()
 	_, _ = systemctl(systemctlTimeout, "daemon-reload")
 	reloadMu.Unlock()

@@ -103,3 +103,29 @@ func TestMetricsRunningIgnoresAForeignUnit(t *testing.T) {
 		t.Error("a foreign checkout's exporter must not report as this checkout's own")
 	}
 }
+
+// StopMetrics's systemctl calls are best-effort and must run even when
+// userUnitDir() cannot resolve the unit directory — only the
+// foreign-checkout ownership check and the unit file removal, which both
+// need that directory, may be skipped. fakeSystemctl is defined in
+// systemd_test.go.
+func TestStopMetricsRunsSystemctlWithoutAUnitDir(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "calls.log")
+	fakeSystemctl(t, log)
+	t.Setenv("HOME", "") // os.UserHomeDir reads only $HOME on Linux
+
+	f := New(&config.Config{Root: t.TempDir(), NamePrefix: "t-w"})
+	if err := f.StopMetrics(); err != nil {
+		t.Fatalf("StopMetrics() = %v, want nil", err)
+	}
+
+	out, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("systemctl was never invoked: %v", err)
+	}
+	for _, want := range []string{"disable --now", "daemon-reload", "reset-failed"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("systemctl calls = %q, missing %q", out, want)
+		}
+	}
+}
