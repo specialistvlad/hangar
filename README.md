@@ -149,13 +149,12 @@ someone is watching it.
 The restart matters because a running manager keeps the groups it started with, and
 every worker inherits them. A manager that was already up when `usermod` ran never
 gains `docker` — and once lingering is on, logging out and back in does not restart
-it; a reboot works too. The restart stops every unit the manager runs, not only the
-worker whose provisioning tripped the check — on a fleet that is already up, that
-means every `hangar-w<n>.service` and `hangar-metrics.service`, including any job
-mid-run. Wait until no worker is busy, or run `make 0` first, before restarting a
-live fleet. `make <n>` checks both — lingering, and that the manager can open the
-docker socket — and refuses to scale until they hold, printing this same warning
-when the restart is still needed.
+it; a reboot works too. The restart stops every unit the manager runs: on a fleet
+that is already up, every `hangar-w<n>.service` and `hangar-metrics.service`,
+including any job mid-run. Wait until no worker is busy, or run `make 0` first,
+before restarting a live fleet. `make <n>` checks both — lingering, and that the
+manager can open the docker socket — and refuses to scale until they hold, printing
+this same warning when the restart is still needed.
 
 The runner itself needs the ICU library. Most distributions ship it; if registration
 complains, install it as an administrator — the fleet's own account has no sudo — then
@@ -346,9 +345,8 @@ held by something else is reported rather than mistaken for success. `make statu
 shows whether it is up, and both it and `make metrics` print the endpoint as a URL a
 browser or curl can open — substituting `127.0.0.1` for an empty or unspecified host,
 so a `METRICS_ADDR` of `:9151` (valid — it means every interface) reads as
-`http://127.0.0.1:9151/metrics` rather than the unusable `http://:9151/metrics`.
-Re-run `make metrics` after rebuilding hangar to restart it on
-the new binary. The endpoint has no authentication: loopback keeps it off the network,
+`http://127.0.0.1:9151/metrics`. Re-run `make metrics` after rebuilding hangar to
+restart it on the new binary. The endpoint has no authentication: loopback keeps it off the network,
 not away from other accounts on the machine — see [SECURITY.md](SECURITY.md).
 
 | Metric | Labels | Meaning |
@@ -383,9 +381,9 @@ window.
 
 `hangar_fleet_list_failures_total` and `hangar_fleet_list_success_timestamp_seconds`
 read whether that same poll's fleet listing reached the supervisor. When a listing
-fails, every other worker gauge is left exactly as it was rather than cleared, so
-these two are how an alert tells a fleet that is genuinely idle and static from one
-whose listing has simply stopped answering.
+fails, every other worker gauge keeps its last value, so these two are how an alert
+tells a fleet that is genuinely idle and static from one whose listing has simply
+stopped answering.
 
 ## The dashboard
 
@@ -531,17 +529,15 @@ both. The third is the exporter's own service, `com.hangar.metrics.plist` or
 running on purpose — it then reports an empty fleet — and `make metrics-stop` or
 `make nuke` removes it.
 
-One account runs one hangar fleet. A second checkout sharing the account — another
-worktree or clone, say staging next to production — is not a second fleet: it writes
-into the same `~/Library/LaunchAgents` or `~/.config/systemd/user`, so its worker and
-exporter names collide with the first checkout's. Before writing or restarting a
-unit or plist, hangar reads back the `WorkingDirectory` any existing one already
-carries: when it falls outside this checkout's own tree, hangar refuses, naming the
-checkout that owns it, instead of overwriting or restarting someone else's fleet.
-Stopping a worker, listing what is running and `make kill` apply the same check the
-other way — a unit or plist belonging to another checkout is left alone and out of
-this checkout's own view entirely, rather than being stopped, killed or counted as
-this fleet's own.
+One account runs one hangar fleet. Every checkout on the account, whether another
+worktree or a clone such as staging next to production, writes into the same
+`~/Library/LaunchAgents` or `~/.config/systemd/user`, so a second checkout's worker
+and exporter names collide with the first's. Before writing or restarting a unit or
+plist, hangar reads back the `WorkingDirectory` of any that already exists. When it
+falls outside this checkout's own tree, hangar refuses and names the checkout that
+owns it. Stopping a worker, listing what runs and `make kill` apply the same check:
+a unit or plist that belongs to another checkout stays running and untouched, and
+this checkout leaves it out of its own fleet.
 
 Settings come from `.env` and nowhere else — the ambient environment is never
 consulted, so a fleet behaves the same from any shell, service manager or cron job.
