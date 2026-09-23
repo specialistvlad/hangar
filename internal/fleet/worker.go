@@ -3,6 +3,7 @@ package fleet
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,12 +49,17 @@ func (f *Fleet) ListChecked() ([]Worker, error) {
 }
 
 // list is List against a given view of the supervisor, so that what is
-// decided from a listing can also be tested without one. Its own ReadDir
-// error comes back rather than being read as an empty WorkersDir, so a
-// caller that must not mistake "could not read" for "nothing here" can act
-// on it.
+// decided from a listing can also be tested without one. WorkersDir not
+// existing yet is a genuinely empty fleet — scale() is the only thing that
+// creates it, so a poll before the first `make <N>` must not read it as a
+// failure. Any other ReadDir error comes back rather than being read as an
+// empty WorkersDir, so a caller that must not mistake "could not read" for
+// "nothing here" can act on it.
 func (f *Fleet) list(loaded map[int]int) ([]Worker, error) {
 	entries, err := os.ReadDir(f.cfg.WorkersDir())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

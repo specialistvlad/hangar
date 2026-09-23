@@ -42,6 +42,21 @@ func listOK(t *testing.T, f *Fleet, loaded map[int]int) []Worker {
 	return ws
 }
 
+// WorkersDir is created by scale()'s first MkdirAll, not by StartMetrics, so
+// list() must read one that has never existed yet as a genuinely empty fleet
+// — not as the same ReadDir failure a permission problem or a stale NFS
+// handle would be, which a caller like the exporter must keep telling apart.
+func TestListReadsAMissingWorkersDirAsEmpty(t *testing.T) {
+	f := New(&config.Config{Root: t.TempDir(), NamePrefix: "t-w"})
+	ws, err := f.list(nil)
+	if err != nil {
+		t.Errorf("err = %v, want nil", err)
+	}
+	if ws != nil {
+		t.Errorf("workers = %v, want nil", ws)
+	}
+}
+
 // A worker counts as present only once provisioning finished, which its
 // marker records. One left behind by a failed or interrupted provision is
 // completed rather than reported as done, and one above the target is still
