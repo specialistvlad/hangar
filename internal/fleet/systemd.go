@@ -104,19 +104,22 @@ func (f *Fleet) startService(n int) error {
 }
 
 // stopService stops and disables worker n's unit and removes its file. Every
-// step is best-effort, so a kill still clears what it can when the user
-// manager is unreachable. A unit belonging to a different checkout of this
-// repository sharing the account is left alone — not stopped, not
-// disabled, not removed: see foreignUnitRoot.
+// systemctl step is unconditional and best-effort, so a kill still clears
+// what it can when the user manager is unreachable — only the
+// foreign-checkout ownership check and the file removal, which both need the
+// unit directory, are skipped when userUnitDir() cannot resolve it, the same
+// tolerance loadedServices already gives that failure. A unit belonging to a
+// different checkout of this repository sharing the account is left alone —
+// not stopped, not disabled, not removed: see foreignUnitRoot.
 func (f *Fleet) stopService(n int) {
 	name := serviceName(n)
-	dir, err := userUnitDir()
-	if err != nil {
-		return
-	}
-	path := filepath.Join(dir, name)
-	if _, ok := foreignUnitRoot(path, f.cfg.WorkersDir()); ok {
-		return
+	dir, dirErr := userUnitDir()
+	var path string
+	if dirErr == nil {
+		path = filepath.Join(dir, name)
+		if _, ok := foreignUnitRoot(path, f.cfg.WorkersDir()); ok {
+			return
+		}
 	}
 	_, _ = systemctl(stopTimeout, "disable", "--now", name)
 	// KillMode=process — the vendor's choice, kept so a runner self-update can
@@ -125,10 +128,12 @@ func (f *Fleet) stopService(n int) {
 	// directory is deleted from under it.
 	_, _ = systemctl(systemctlTimeout, "kill", "--signal=SIGKILL", name)
 
-	_ = os.Remove(path)
-	// disable removes this link itself; clearing it by hand covers the case
-	// where it could not run, so the next boot has no dangling want.
-	_ = os.Remove(filepath.Join(dir, "default.target.wants", name))
+	if dirErr == nil {
+		_ = os.Remove(path)
+		// disable removes this link itself; clearing it by hand covers the case
+		// where it could not run, so the next boot has no dangling want.
+		_ = os.Remove(filepath.Join(dir, "default.target.wants", name))
+	}
 	reloadMu.Lock()
 	_, _ = systemctl(systemctlTimeout, "daemon-reload")
 	reloadMu.Unlock()

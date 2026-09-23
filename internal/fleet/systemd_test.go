@@ -5,10 +5,13 @@ package fleet
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/specialistvlad/hangar/internal/config"
 )
 
 // userCmd must hand every command its own XDG_RUNTIME_DIR and
@@ -34,6 +37,43 @@ func TestUserCmdSetsRuntimeAndBusFromUID(t *testing.T) {
 	want := fmt.Sprintf("/run/user/%d unix:path=/run/user/%d/bus", uid, uid)
 	if out != want {
 		t.Errorf("userCmd env = %q, want %q", out, want)
+	}
+}
+
+// fakeSystemctl puts a script named systemctl ahead of the real one on PATH
+// that appends every invocation's arguments, one per line, to log — standing
+// in for the user manager so a test can see what stopService tried without
+// one actually running.
+func fakeSystemctl(t *testing.T, log string) {
+	t.Helper()
+	bin := t.TempDir()
+	script := "#!/bin/sh\necho \"$*\" >> " + log + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// stopService's systemctl calls are best-effort and must run even when
+// userUnitDir() cannot resolve the unit directory — only the
+// foreign-checkout ownership check and the unit file removal, which both
+// need that directory, may be skipped.
+func TestStopServiceRunsSystemctlWithoutAUnitDir(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "calls.log")
+	fakeSystemctl(t, log)
+	t.Setenv("HOME", "") // os.UserHomeDir reads only $HOME on Linux
+
+	f := New(&config.Config{Root: t.TempDir(), NamePrefix: "t-w"})
+	f.stopService(1)
+
+	out, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("systemctl was never invoked: %v", err)
+	}
+	for _, want := range []string{"disable --now", "kill --signal=SIGKILL", "daemon-reload", "reset-failed"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("systemctl calls = %q, missing %q", out, want)
+		}
 	}
 }
 
