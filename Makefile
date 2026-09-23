@@ -98,12 +98,14 @@ export GOTOOLCHAIN := local
 export GOFLAGS     := -mod=vendor
 export GOLANGCI_LINT_CACHE := $(ROOT)/.gocache/golangci-lint
 export HANGAR_ROOT := $(ROOT)
-# A Mac builds hangar for its hardware even from a terminal running under
-# Rosetta, so the binary never runs translated. The Go chosen above is native,
-# so this never turns a tool install into a cross-compile.
-ifeq ($(GO_OS),darwin)
-export GOARCH      := $(GO_ARCH)
-endif
+# Pinned on both platforms, for two different reasons: on a Mac it builds
+# hangar for its hardware even from a terminal running under Rosetta, so the
+# binary never runs translated; on either platform it overrides a `go env -w
+# GOARCH=...` left over from an unrelated project, which would otherwise
+# silently cross-compile the binary for that persisted architecture instead
+# of the host's own. The Go chosen above is native, so this never turns a
+# tool install into a cross-compile.
+export GOARCH      := $(GO_NATIVE_ARCH)
 # The pinned toolchain has to lead PATH, not just GOROOT: golangci-lint and
 # gotestsum shell out to whatever `go` they find, and finding an ambient one
 # under GOTOOLCHAIN=local fails outright rather than switching.
