@@ -31,6 +31,17 @@ func mkWorker(t *testing.T, f *Fleet, n int, registered, ready bool) {
 	}
 }
 
+// listOK is f.list for a test that has already laid out a readable
+// WorkersDir and cares only about the workers, not a ReadDir error.
+func listOK(t *testing.T, f *Fleet, loaded map[int]int) []Worker {
+	t.Helper()
+	ws, err := f.list(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ws
+}
+
 // A worker counts as present only once provisioning finished, which its
 // marker records. One left behind by a failed or interrupted provision is
 // completed rather than reported as done, and one above the target is still
@@ -43,7 +54,7 @@ func TestPlanCompletesUnfinishedWorkers(t *testing.T) {
 	mkWorker(t, f, 5, false, false)
 	mkWorker(t, f, 6, false, true) // a marker without .runner is not ready either
 
-	add, drop := plan(4, f.list(map[int]int{1: 100, 3: 0}))
+	add, drop := plan(4, listOK(t, f, map[int]int{1: 100, 3: 0}))
 	if !reflect.DeepEqual(add, []int{2, 3, 4}) {
 		t.Errorf("add = %v, want [2 3 4]", add)
 	}
@@ -66,17 +77,17 @@ func TestMigrateMarkers(t *testing.T) {
 	mkWorker(t, f, 5, true, false) // pre-marker, above the target below
 	failed := errors.New("launchctl list: timeout")
 
-	if err := f.migrateMarkers(3, f.list(nil), failed); err == nil {
+	if err := f.migrateMarkers(3, listOK(t, f, nil), failed); err == nil {
 		t.Fatal("a failed listing with an unmarked worker the scale keeps must stop it")
 	}
 	if exists(filepath.Join(f.cfg.WorkerDir(1), readyMarker)) {
 		t.Fatal("nothing may be marked when the listing failed")
 	}
-	if err := f.migrateMarkers(0, f.list(nil), failed); err != nil {
+	if err := f.migrateMarkers(0, listOK(t, f, nil), failed); err != nil {
 		t.Errorf("a scale to 0 keeps no worker, so a failed listing must not stop it: %v", err)
 	}
 
-	ws := f.list(map[int]int{1: 100, 2: 0})
+	ws := listOK(t, f, map[int]int{1: 100, 2: 0})
 	if err := f.migrateMarkers(3, ws, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -86,13 +97,38 @@ func TestMigrateMarkers(t *testing.T) {
 	if !exists(filepath.Join(f.cfg.WorkerDir(1), readyMarker)) {
 		t.Error("the running pre-marker worker should now carry the marker")
 	}
-	if err := f.migrateMarkers(3, f.list(nil), failed); err == nil {
+	if err := f.migrateMarkers(3, listOK(t, f, nil), failed); err == nil {
 		t.Error("w2 is still unmarked, so a failed listing must still stop a scale that keeps it")
 	}
 
 	mkWorker(t, f, 2, true, true)
-	if err := f.migrateMarkers(3, f.list(nil), failed); err != nil {
+	if err := f.migrateMarkers(3, listOK(t, f, nil), failed); err != nil {
 		t.Errorf("with every kept worker marked, a failed listing no longer matters: %v", err)
+	}
+}
+
+// ListChecked exists so a caller can tell "stopped" from "could not ask the
+// supervisor" — and a ReadDir failure on WorkersDir itself must report the
+// same way, not come back as a clean, empty fleet.
+func TestListCheckedReportsAnUnreadableWorkersDir(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads through any permission bits")
+	}
+	f := New(&config.Config{Root: t.TempDir(), NamePrefix: "t-w"})
+	if err := os.MkdirAll(f.cfg.WorkersDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(f.cfg.WorkersDir(), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.cfg.WorkersDir(), 0o755) })
+
+	ws, err := f.ListChecked()
+	if err == nil {
+		t.Fatal("an unreadable WorkersDir must be reported, not read as an empty fleet")
+	}
+	if ws != nil {
+		t.Errorf("workers = %v, want nil alongside the error", ws)
 	}
 }
 

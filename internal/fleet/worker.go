@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,22 +35,27 @@ type Worker struct {
 // there is no separate registry file that could drift out of sync with them.
 func (f *Fleet) List() []Worker {
 	loaded, _ := loadedServices(f.cfg.WorkersDir()) // for display: a failed listing shows workers as stopped
-	return f.list(loaded)
+	ws, _ := f.list(loaded) // for display: a failed read shows workers as stopped too
+	return ws
 }
 
 // ListChecked is List for a caller that must tell "stopped" from "could not
 // ask the supervisor": the workers on disk come back either way.
 func (f *Fleet) ListChecked() ([]Worker, error) {
-	loaded, err := loadedServices(f.cfg.WorkersDir())
-	return f.list(loaded), err
+	loaded, lerr := loadedServices(f.cfg.WorkersDir())
+	ws, rerr := f.list(loaded)
+	return ws, errors.Join(lerr, rerr)
 }
 
 // list is List against a given view of the supervisor, so that what is
-// decided from a listing can also be tested without one.
-func (f *Fleet) list(loaded map[int]int) []Worker {
+// decided from a listing can also be tested without one. Its own ReadDir
+// error comes back rather than being read as an empty WorkersDir, so a
+// caller that must not mistake "could not read" for "nothing here" can act
+// on it.
+func (f *Fleet) list(loaded map[int]int) ([]Worker, error) {
 	entries, err := os.ReadDir(f.cfg.WorkersDir())
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	var ws []Worker
@@ -75,7 +81,7 @@ func (f *Fleet) list(loaded map[int]int) []Worker {
 		})
 	}
 	sort.Slice(ws, func(i, j int) bool { return ws[i].Index < ws[j].Index })
-	return ws
+	return ws, nil
 }
 
 // plan returns the worker indexes to create and to remove to reach n. Removals

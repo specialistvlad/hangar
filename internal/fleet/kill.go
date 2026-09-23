@@ -54,7 +54,11 @@ func (f *Fleet) Kill(progress func(string)) int {
 	if err != nil {
 		progress(fmt.Sprintf("warning: %v — killing what is on disk and in the service definitions", err))
 	}
-	targets := killTargets(f.list(loaded), loaded)
+	disk, listErr := f.list(loaded)
+	if listErr != nil {
+		progress(fmt.Sprintf("warning: %v — killing what the supervisor lists", listErr))
+	}
+	targets := killTargets(disk, loaded)
 	for _, n := range targets {
 		progress(fmt.Sprintf("killing %s", f.cfg.WorkerName(n)))
 		f.stopService(n)
