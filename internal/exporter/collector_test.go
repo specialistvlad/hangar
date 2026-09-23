@@ -103,9 +103,9 @@ func TestRecoveredTransitionsAreNotCounted(t *testing.T) {
 }
 
 // A worker can go briefly "not up" mid-job — a restart under Restart=always
-// or KeepAlive — while the job it started keeps running. hangar_jobs_total
-// and hangar_job_duration_seconds_count must still move together for that
-// job's real end, not just the counter.
+// or KeepAlive — while the job it started keeps running. Once it is up again
+// it reports that job as busy, and hangar_jobs_total and
+// hangar_job_duration_seconds_count move together for the job's real end.
 func TestJobEndAfterTransientDown(t *testing.T) {
 	c := NewCollector("v", "c")
 	c.SetFleet([]fleet.Worker{{Index: 1, Name: "w", Registered: true, Running: true}})
@@ -113,7 +113,14 @@ func TestJobEndAfterTransientDown(t *testing.T) {
 	c.Apply(logsStart(1, start))
 
 	c.SetFleet([]fleet.Worker{{Index: 1, Name: "w", Registered: false, Running: false}})
-	mustHave(t, render(c), `hangar_worker_busy{worker="w1",runner="w"} 0`)
+	down := render(c)
+	mustHave(t, down, `hangar_worker_busy{worker="w1",runner="w"} 0`)
+	mustNotHave(t, down, "hangar_worker_job_info{")
+
+	c.SetFleet([]fleet.Worker{{Index: 1, Name: "w", Registered: true, Running: true}})
+	mustHave(t, render(c),
+		`hangar_worker_busy{worker="w1",runner="w"} 1`,
+		`hangar_worker_job_start_timestamp_seconds{worker="w1",runner="w"} 1000`)
 
 	c.Apply(logs.Event{Worker: 1, Kind: logs.KindJobEnd, Result: "Succeeded", At: start.Add(30 * time.Second)})
 	mustHave(t, render(c),

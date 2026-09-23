@@ -81,7 +81,8 @@ func (c *Collector) worker(n int) *workerState {
 
 // SetFleet applies a fleet listing the supervisor answered. A worker is up
 // while its runner is registered and its listener process runs; one that is
-// not up runs no job either; a worker no longer on disk drops out, with its
+// not up runs no job either, and one that is up again with its job still open
+// is busy with it again; a worker no longer on disk drops out, with its
 // series.
 func (c *Collector) SetFleet(ws []fleet.Worker) {
 	c.mu.Lock()
@@ -92,8 +93,11 @@ func (c *Collector) SetFleet(ws []fleet.Worker) {
 		w := c.worker(fw.Index)
 		w.runner = fw.Name
 		w.up = fw.Registered && fw.Running
-		if !w.up {
+		switch {
+		case !w.up:
 			w.notUp()
+		case !w.start.IsZero():
+			w.busy = true
 		}
 	}
 	for n := range c.workers {
@@ -141,17 +145,15 @@ func (w *workerState) idle() {
 	w.info, w.infoOK, w.tries, w.logPath = logs.JobInfo{}, false, 0, ""
 }
 
-// notUp clears a worker's dashboard-facing busy state when the supervisor
-// reports it as not running. The job's start stays in place: a worker can go
-// briefly "not up" mid-job (a restart under Restart=always or KeepAlive)
-// without losing the timestamp its eventual KindJobEnd needs, so
+// notUp clears a worker's busy flag when the supervisor reports it as not
+// running, and keeps the job itself: a worker can go briefly "not up" mid-job
+// (a restart under Restart=always or KeepAlive) and come back still running
+// it. The start, name and repository stay for SetFleet to re-arm busy with,
+// and the start is what the job's eventual KindJobEnd needs, so
 // hangar_jobs_total and hangar_job_duration_seconds keep counting the same
 // set of live job ends. Only that job's own end, a new start, or a
-// KindListening transition clears it.
-func (w *workerState) notUp() {
-	w.busy, w.job = false, ""
-	w.info, w.infoOK, w.tries = logs.JobInfo{}, false, 0
-}
+// KindListening transition clears them.
+func (w *workerState) notUp() { w.busy = false }
 
 // PendingJob is a busy worker whose job's repository and run are not known
 // yet: its start, for the lookup, and the Worker_*.log a previous lookup
