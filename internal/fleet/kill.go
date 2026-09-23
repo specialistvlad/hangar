@@ -52,6 +52,8 @@ func (f *Fleet) Kill(progress func(string)) (attempted, left int) {
 		progress("warning: a scale is running in another process and may recreate workers — stop it and run kill again")
 	} else if err == nil {
 		unlock()
+	} else {
+		progress(fmt.Sprintf("warning: could not check for a running scale: %v", err))
 	}
 	loaded, err := loadedServices(f.cfg.WorkersDir())
 	if err != nil {

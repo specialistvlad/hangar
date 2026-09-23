@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/specialistvlad/hangar/internal/config"
@@ -90,4 +91,21 @@ func TestKillReportsWorkersLeftOnDisk(t *testing.T) {
 	if left != 1 {
 		t.Errorf("left = %d, want 1: removeWorker could not clear the read-only directory", left)
 	}
+}
+
+// A lockScale error that is not ErrScaleBusy — its own lock file could not be
+// opened, say — must still be reported: dropping it silently would leave no
+// sign that Kill's "is a scale running" check never ran at all.
+func TestKillWarnsAboutALockScaleErrorThatIsNotBusy(t *testing.T) {
+	f := New(&config.Config{Root: t.TempDir(), NamePrefix: "t-w"})
+	// WorkersDir is never created, so lockScale's os.OpenFile fails on a
+	// missing parent directory — a real, non-ErrScaleBusy error.
+	var said []string
+	f.Kill(func(s string) { said = append(said, s) })
+	for _, s := range said {
+		if strings.Contains(s, "could not check for a running scale") {
+			return
+		}
+	}
+	t.Errorf("no warning about the failed lock check in %q", said)
 }
