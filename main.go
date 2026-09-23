@@ -95,10 +95,15 @@ func run(args []string) error {
 	case "kill":
 		// No RequireGitHub and no CheckAuth: a kill is what is left when the
 		// token is the thing that is broken, so it must never consult one.
-		n := f.Kill(logf)
+		n, left := f.Kill(logf)
 		if n == 0 {
 			logf("no workers to kill")
 			return nil
+		}
+		if left > 0 {
+			logf(fmt.Sprintf("killed %d worker(s), %d left on disk — see warnings above; still "+
+				"registered on GitHub as offline, remove them there once GH_TOKEN works", n, left))
+			return fmt.Errorf("%d worker(s) left on disk", left)
 		}
 		logf(fmt.Sprintf("killed %d worker(s) — still registered on GitHub as offline, "+
 			"remove them there once GH_TOKEN works", n))

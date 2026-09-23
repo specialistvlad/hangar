@@ -1,8 +1,12 @@
 package fleet
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/specialistvlad/hangar/internal/config"
 )
 
 // A force-kill exists for the case where GitHub cannot be reached at all, so it
@@ -55,5 +59,35 @@ func TestKillTargetsCoverDisksAndServices(t *testing.T) {
 				t.Errorf("killTargets = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// Kill reports how many targets it attempted alongside how many removeWorker
+// left behind, so main.go can print a distinct summary and exit non-zero
+// instead of calling a kill complete when a worker directory is still there.
+func TestKillReportsWorkersLeftOnDisk(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root can remove through any permission bits")
+	}
+	f := New(&config.Config{Root: t.TempDir(), NamePrefix: "t-w"})
+	mkWorker(t, f, 1, true, true)
+	dir := f.cfg.WorkerDir(1)
+	if err := os.WriteFile(filepath.Join(dir, "stuck"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No write permission on the worker's own directory: removeWorker can list
+	// "stuck" but cannot unlink it, the same shape as a file a job's container
+	// left behind as root.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	attempted, left := f.Kill(func(string) {})
+	if attempted != 1 {
+		t.Errorf("attempted = %d, want 1", attempted)
+	}
+	if left != 1 {
+		t.Errorf("left = %d, want 1: removeWorker could not clear the read-only directory", left)
 	}
 }

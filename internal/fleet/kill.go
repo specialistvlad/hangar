@@ -41,8 +41,11 @@ func killTargets(disk []Worker, loaded map[int]int) []int {
 // registrations survive, listed in the org as offline, until a token exists to
 // remove them or an operator deletes them by hand.
 //
-// It returns the number of workers torn down.
-func (f *Fleet) Kill(progress func(string)) int {
+// It returns how many targets it attempted and how many of those
+// removeWorker could not finish — left on disk, typically by files a job's
+// container wrote as root — so a caller can tell a clean kill from one an
+// operator still has to finish by hand.
+func (f *Fleet) Kill(progress func(string)) (attempted, left int) {
 	// Kill takes no lock — it is what is left when a scale hangs — but a scale
 	// still running elsewhere would recreate workers it has not reached yet.
 	if unlock, err := lockScale(f.lockPath(), progress, false); errors.Is(err, ErrScaleBusy) {
@@ -64,9 +67,10 @@ func (f *Fleet) Kill(progress func(string)) int {
 		f.stopService(n)
 		if err := f.removeWorker(n); err != nil {
 			progress(fmt.Sprintf("  w%d left on disk: %v", n, err))
+			left++
 		}
 	}
-	return len(targets)
+	return len(targets), left
 }
 
 // removeWorker deletes everything on disk that belongs to worker n: its
