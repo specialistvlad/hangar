@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +17,22 @@ import (
 
 	"github.com/specialistvlad/hangar/internal/fleet"
 )
+
+// counterValue reads a label-less sample's current value from a scrape body,
+// for asserting on a number the poll loop keeps moving rather than one fixed
+// line mustHave can match.
+func counterValue(t *testing.T, body, name string) float64 {
+	t.Helper()
+	m := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + ` ([0-9.e+-]+)$`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no %s sample in:\n%s", name, body)
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		t.Fatalf("%s value %q: %v", name, m[1], err)
+	}
+	return v
+}
 
 // The whole loop against a real directory: a job start written to a worker's
 // runner log shows up as busy, a failed listing leaves the workers as they
@@ -93,6 +111,13 @@ func TestServeLoop(t *testing.T) {
 	if body, _ := scrape(); !strings.Contains(body, `hangar_worker_up{worker="w1",runner="box-w1"} 1`) {
 		t.Errorf("a failed listing must leave the worker as it was:\n%s", body)
 	}
+
+	// The poll loop must call ObserveListing on every poll, including a
+	// failing one — not only when list() succeeds — or a supervisor that
+	// keeps failing would never show up here.
+	eventually("the failing listing counted", func(b string) bool {
+		return counterValue(t, b, "hangar_fleet_list_failures_total") > 0
+	})
 
 	// A job that starts and finishes while the listing keeps failing must
 	// still be counted: the log watcher started before the outage has to
