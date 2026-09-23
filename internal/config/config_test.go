@@ -131,6 +131,35 @@ func TestDefaultLang(t *testing.T) {
 	}
 }
 
+// The rootless socket sits between Docker Desktop's and the rootful system
+// one, so a rootless install is found before detectDockerHost ever falls
+// back to a path that only exists on a rootful host.
+func TestDockerHostCandidates(t *testing.T) {
+	home := func() (string, error) { return "/home/op", nil }
+	uid := func() int { return 1000 }
+	want := []string{
+		"/home/op/.docker/run/docker.sock",
+		"/run/user/1000/docker.sock",
+		"/var/run/docker.sock",
+	}
+	got := dockerHostCandidates(home, uid)
+	if len(got) != len(want) {
+		t.Fatalf("dockerHostCandidates = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("candidate %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	noHome := func() (string, error) { return "", os.ErrNotExist }
+	got = dockerHostCandidates(noHome, uid)
+	want = []string{"/run/user/1000/docker.sock", "/var/run/docker.sock"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("dockerHostCandidates with no home = %#v, want %#v", got, want)
+	}
+}
+
 func TestCleanSharePath(t *testing.T) {
 	ok := map[string]string{
 		".npm":              ".npm",
