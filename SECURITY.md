@@ -31,20 +31,30 @@ positions rather than oversights:
   Each worker gets its own `HOME`, so every tool's dotfiles are separate — but
   what lands on disk is plaintext, mode 0600. The README's *Where credentials
   actually live* table is the full inventory.
-- **Registry credentials are stored in a plain file, not the macOS keychain.**
-  A keychain write from a launchd agent raises a SecurityAgent dialog nobody can
-  click, which deadlocks every `docker login`. hangar ships its own credential
-  helper specifically to avoid that fallback.
+- **Registry credentials are stored in a plain file, not the macOS keychain or
+  a Linux secret service.** A keychain write from a launchd agent raises a
+  SecurityAgent dialog nobody can click, which deadlocks every `docker login`,
+  and a headless Linux service has no secret service at all. hangar ships its
+  own credential helper specifically to avoid those fallbacks.
 - **The runner identity RSA key is plaintext.** That is how GitHub's own runner
-  stores it on macOS; only Windows gets DPAPI. It is identical on a
+  stores it on macOS and Linux; only Windows gets DPAPI. It is identical on a
   hand-installed runner.
+- **The metrics exporter is unauthenticated plain HTTP.** `make metrics` serves
+  the fleet's state — repositories, workflows, job names and run ids — on
+  `127.0.0.1:9151` by default. Loopback keeps it off the network, not away from
+  other accounts on the same machine. On a shared host, restrict it to the
+  scraper's account (for example an nftables `meta skuid` rule), put an
+  authenticating proxy in front, or leave it stopped. It never serves `GH_TOKEN`,
+  registry credentials or anything from a job's environment.
 - **Workers share one Docker daemon and its BuildKit cache.** That shared cache
   is the reason to build locally at all. A job that can reach the daemon can
   reach the host — self-hosted runners are not a sandbox, which is why GitHub
-  advises against using them on public repositories.
+  advises against using them on public repositories. On Linux that is literal:
+  membership in the `docker` group is root-equivalent, so a dedicated account
+  for the fleet limits what a job can read, not what it can ultimately do.
 
 ## Self-hosted runners and public repositories
 
 Do not point hangar's runners at a public repository. Anyone who can open a pull
-request could then run code on your Mac. This is GitHub's guidance for all
+request could then run code on your machine. This is GitHub's guidance for all
 self-hosted runners, not a hangar-specific limitation.

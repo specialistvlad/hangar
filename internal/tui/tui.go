@@ -64,6 +64,7 @@ type Model struct {
 	scaleSince time.Time
 	note       string
 	scaleErr   string
+	quitting   bool // asked to quit while a pass runs; quits when it lands
 
 	focus     int // 0 shows every worker
 	follow    bool
@@ -99,7 +100,13 @@ func New(f *fleet.Fleet) *Model {
 func (m *Model) Init() tea.Cmd {
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 
-	sampler := metrics.NewSampler() // owned by its goroutine, touched nowhere else
+	cfg := m.flt.Config()
+	disks := []metrics.Disk{{Label: "workers", Path: cfg.Root}}
+	if cfg.TmpRoot != "" {
+		disks = append(disks, metrics.Disk{Label: "tmp", Path: cfg.TmpRoot})
+	}
+	// Owned by its goroutine, touched nowhere else.
+	sampler := metrics.NewSampler(metrics.Options{Disks: disks, DockerHost: cfg.DockerHost})
 	go poll(m.ctx, m.fleetCh, func() fleetMsg { return fleetMsg(m.flt.List()) })
 	go poll(m.ctx, m.sampleCh, func() sampleMsg { return sampleMsg(sampler.Frame()) })
 
@@ -146,10 +153,7 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "q", "ctrl+c", "esc":
-		if m.cancel != nil {
-			m.cancel()
-		}
-		return m, tea.Quit
+		return m, m.quit()
 	case "/":
 		m.filtering = true
 		m.filter.Focus()

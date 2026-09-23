@@ -1,33 +1,25 @@
 package fleet
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"regexp"
 	"sort"
-	"strconv"
 )
 
-// labelIndex matches the launchd label config.Label builds. Parsing it back is
-// what lets a kill reach an agent whose worker directory has already gone.
-var labelIndex = regexp.MustCompile(`^com\.hangar\.w(\d+)$`)
-
 // killTargets is every worker index the machine still holds a trace of: a
-// directory under workers/, a loaded launchd agent, or both. Scale works from
-// the directories alone because it can trust its own bookkeeping; a kill is
-// reached for when that bookkeeping is already suspect, so it takes the union.
-func killTargets(disk []Worker, loaded map[string]int) []int {
+// directory under workers/, a service the supervisor still knows, or both.
+// Scale works from the directories alone because it can trust its own
+// bookkeeping; a kill is reached for when that bookkeeping is already suspect,
+// so it takes the union.
+func killTargets(disk []Worker, loaded map[int]int) []int {
 	seen := map[int]bool{}
 	for _, w := range disk {
 		seen[w.Index] = true
 	}
-	for label := range loaded {
-		if m := labelIndex.FindStringSubmatch(label); m != nil {
-			n, err := strconv.Atoi(m[1])
-			if err == nil {
-				seen[n] = true
-			}
-		}
+	for n := range loaded {
+		seen[n] = true
 	}
 
 	var out []int
@@ -38,8 +30,9 @@ func killTargets(disk []Worker, loaded map[string]int) []int {
 	return out
 }
 
-// Kill tears the whole fleet off this Mac without talking to GitHub: it boots
-// out each launchd agent, removes its plist and deletes the worker directory.
+// Kill tears the whole fleet off this machine without talking to GitHub: it
+// stops each worker's service, removes its definition and deletes the worker's
+// directories.
 //
 // It is the escape hatch for the case Scale cannot serve. Scale unregisters
 // every worker server-side first, which needs a removal token, so an expired or
@@ -48,15 +41,78 @@ func killTargets(disk []Worker, loaded map[string]int) []int {
 // registrations survive, listed in the org as offline, until a token exists to
 // remove them or an operator deletes them by hand.
 //
-// It returns the number of workers torn down.
-func (f *Fleet) Kill(progress func(string)) int {
-	targets := killTargets(f.List(), launchctlList())
+// It returns how many targets it attempted and how many of those
+// removeWorker could not finish — left on disk, typically by files a job's
+// container wrote as root — so a caller can tell a clean kill from one an
+// operator still has to finish by hand.
+func (f *Fleet) Kill(progress func(string)) (attempted, left int) {
+	// Kill takes no lock — it is what is left when a scale hangs — but a scale
+	// still running elsewhere would recreate workers it has not reached yet.
+	if unlock, err := lockScale(f.lockPath(), progress, false); errors.Is(err, ErrScaleBusy) {
+		progress("warning: a scale is running in another process and may recreate workers — stop it and run kill again")
+	} else if err == nil {
+		unlock()
+	} else {
+		progress(fmt.Sprintf("warning: could not check for a running scale: %v", err))
+	}
+	loaded, err := loadedServices(f.cfg.WorkersDir())
+	if err != nil {
+		progress(fmt.Sprintf("warning: %v — killing what is on disk and in the service definitions", err))
+	}
+	disk, listErr := f.list(loaded)
+	if listErr != nil {
+		progress(fmt.Sprintf("warning: %v — killing what the supervisor lists", listErr))
+	}
+	targets := killTargets(disk, loaded)
 	for _, n := range targets {
 		progress(fmt.Sprintf("killing %s", f.cfg.WorkerName(n)))
 		f.stopService(n)
-		if err := os.RemoveAll(f.cfg.WorkerDir(n)); err != nil {
-			progress(fmt.Sprintf("  %s left on disk: %v", f.cfg.WorkerDir(n), err))
+		if err := f.removeWorker(n); err != nil {
+			progress(fmt.Sprintf("  w%d left on disk: %v", n, err))
+			left++
 		}
 	}
-	return len(targets)
+	return len(targets), left
+}
+
+// removeWorker deletes everything on disk that belongs to worker n: its
+// directory, and its TMPDIR when WORKER_TMP_ROOT put that somewhere else.
+func (f *Fleet) removeWorker(n int) error {
+	dir := f.cfg.WorkerDir(n)
+	err := os.RemoveAll(dir)
+	if errors.Is(err, fs.ErrPermission) {
+		// On Linux a container that bind-mounts part of a worker writes as root,
+		// so a job can leave files its own account cannot delete — in the
+		// workspace, the private home or TMPDIR alike.
+		err = rootOwnedHint(err, f.cfg.WorkersDir(), fmt.Sprintf("w%d", n))
+	}
+	if f.cfg.TmpRoot == "" {
+		return err
+	}
+	// Only a directory this account owns is removed. Anything else at that
+	// path — a symlink, or another user's directory — was not made by hangar.
+	tmp := f.workerTmp(n)
+	fi, statErr := os.Lstat(tmp)
+	switch {
+	case os.IsNotExist(statErr):
+	case statErr != nil:
+		err = errors.Join(err, statErr)
+	case !fi.IsDir() || !ownedByMe(fi):
+		err = errors.Join(err, fmt.Errorf("left %s in place: not a directory this account owns", tmp))
+	default:
+		tmpErr := os.RemoveAll(tmp)
+		if errors.Is(tmpErr, fs.ErrPermission) {
+			tmpErr = rootOwnedHint(tmpErr, f.cfg.TmpRoot, fmt.Sprintf("w%d", n))
+		}
+		err = errors.Join(err, tmpErr)
+	}
+	return err
+}
+
+// rootOwnedHint explains a permission error from deleting parent/name and how
+// to finish the job: the fleet's account can still reach docker, and a
+// container can delete what a container wrote.
+func rootOwnedHint(err error, parent, name string) error {
+	return fmt.Errorf("%w — likely files a container wrote as root; remove them through docker, "+
+		"then scale again: docker run --rm -v %q:/w alpine rm -rf /w/%s", err, parent, name)
 }

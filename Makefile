@@ -1,9 +1,11 @@
-# hangar — GitHub Actions runner fleet for one Mac.
+# hangar — GitHub Actions runner fleet for one machine, macOS or Linux.
 #
 # Everything hangar needs lives inside this directory: its own Go toolchain, its
 # own module cache, its own lint and test binaries, its own runner tarballs.
-# Nothing is read from or written to the ambient system except
-# ~/Library/LaunchAgents, which is the only place launchd loads login agents from.
+# Nothing is read from or written to the ambient system except where the
+# service manager loads workers from — ~/Library/LaunchAgents for launchd on
+# macOS, ~/.config/systemd/user for the systemd user manager on Linux — and,
+# when .env sets WORKER_TMP_ROOT, the workers' TMPDIRs under it.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -11,26 +13,48 @@ SHELL := /bin/bash
 ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 GO_VERSION        := 1.26.5
-# Checksum of the darwin-arm64 archive, published by go.dev alongside the
-# release. Update it whenever GO_VERSION changes; the value is the sha256 field
-# from https://go.dev/dl/?mode=json&include=all for this version.
-GO_SHA256         := efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a
+# The toolchain archive for this machine, named the way go.dev names it. On a
+# Mac the architecture comes from the hardware rather than uname: a terminal
+# running under Rosetta reports x86_64 on Apple Silicon, and hw.optional.arm64
+# still reads 1 there. go.dev's armv6l build is the one for all 32-bit ARM.
+GO_OS             := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+ifeq ($(GO_OS),darwin)
+GO_ARCH           := $(if $(filter 1,$(shell /usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null)),arm64,amd64)
+else
+GO_ARCH           := $(shell uname -m | sed -e 's/^x86_64$$/amd64/' -e 's/^aarch64$$/arm64/' -e 's/^armv[67]l$$/armv6l/')
+endif
+GO_PLATFORM       := $(GO_OS)-$(GO_ARCH)
+# Checksums of each archive, published by go.dev alongside the release. Update
+# them whenever GO_VERSION changes; the values are the sha256 fields from
+# https://go.dev/dl/?mode=json&include=all for this version.
+GO_SHA256_darwin-arm64 := efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a
+GO_SHA256_darwin-amd64 := 6231d8d3b8f5552ec6cbf6d685bdd5482e1e703214b120e89b3bf0d7bf1ef725
+GO_SHA256_linux-amd64  := 5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
+GO_SHA256_linux-arm64  := fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49
+GO_SHA256_linux-armv6l := 6dae9edab81c13bccf962dec15f1fd2ec26c14a6821b4d2c92dab4130c289d7a
+GO_SHA256         := $(GO_SHA256_$(GO_PLATFORM))
+# sha256sum on Linux, shasum on macOS; both read the same "<sum>  <file>" line.
+SHA256_CHECK      := $(if $(shell command -v sha256sum 2>/dev/null),sha256sum -c -,shasum -a 256 -c -)
 GOLANGCI_VERSION  := v2.12.2
 GOTESTSUM_VERSION := v1.13.0
 MAX_FILE_LINES    := 250
 
 GO_DIR    := $(ROOT)/.toolchain/go
 
-# Reuse an already-installed Go when it matches the pin exactly, and download a
-# private one only when it does not. A vendored toolchain is ~260MB to produce a
-# ~10MB binary, so duplicating a Go that is already present buys nothing; the
-# download still guarantees a machine with no Go at all can build.
+# Reuse an already-installed Go when it matches the pin exactly — version and
+# the machine's own architecture — and download a private one only when it
+# does not. A vendored toolchain is ~260MB to produce a ~10MB binary, so
+# duplicating a Go that is already present buys nothing; the download still
+# guarantees a machine with no Go at all can build. The architecture has to
+# match too: an x86_64 Go on Apple Silicon would make every tool install below
+# a cross-compile, which `go install` refuses with GOBIN set.
 # GOTOOLCHAIN=local on the probes: without it, an ambient go run inside this
 # module auto-switches to the toolchain go.mod asks for and reports *that*
 # version, so a mismatched go looks like a match — and the build then runs the
 # ambient binary with GOTOOLCHAIN=local, which refuses the very switch the probe
 # relied on. Pinned to the binary's own version, the check means what it says.
-ifeq ($(shell GOTOOLCHAIN=local go env GOVERSION 2>/dev/null),go$(GO_VERSION))
+GO_NATIVE_ARCH := $(patsubst armv6l,arm,$(GO_ARCH))
+ifeq ($(shell GOTOOLCHAIN=local go env GOVERSION GOHOSTARCH 2>/dev/null | paste -sd' ' -),go$(GO_VERSION) $(GO_NATIVE_ARCH))
 GO        := $(shell command -v go)
 GOROOT_DIR := $(shell GOTOOLCHAIN=local go env GOROOT)
 else
@@ -38,6 +62,25 @@ GO        := $(GO_DIR)/bin/go
 GOROOT_DIR := $(GO_DIR)
 endif
 BIN       := $(ROOT)/.bin/hangar
+# What hangar_build_info reports: the checkout's commit, marked dirty when it
+# has uncommitted changes (untracked sources included), and the nearest tag if
+# there is one. Outside a git checkout both are unknown, not dirty.
+HANGAR_HEAD    := $(shell git -C $(ROOT) rev-parse --short=12 HEAD 2>/dev/null)
+HANGAR_COMMIT  := $(if $(HANGAR_HEAD),$(HANGAR_HEAD)$(if $(shell git -C $(ROOT) status --porcelain 2>/dev/null),-dirty),unknown)
+# A git tag name can carry shell metacharacters (quotes, backticks, ;, |, &)
+# that would otherwise reach LDFLAGS verbatim below, in both the build
+# recipe's -ldflags string and $(BUILDINFO)'s comparison; tr keeps only a
+# safe charset, and semver-with-suffix tags like v1.2.3-4-gabc1234 already
+# live entirely inside it.
+HANGAR_VERSION := $(strip $(shell git -C $(ROOT) describe --tags --always 2>/dev/null | tr -cd 'A-Za-z0-9._+-'))
+HANGAR_VERSION := $(if $(HANGAR_VERSION),$(HANGAR_VERSION),dev)
+LDFLAGS   := -X main.version=$(HANGAR_VERSION) -X main.commit=$(HANGAR_COMMIT)
+# The stamp is rewritten only when it changes, and the binary depends on it:
+# a commit or a clean-up alone must rebuild, or build_info would name a
+# commit the binary was not built from. Writing it is a recipe further down
+# (see FORCE), not a parse-time $(shell ...): a dry run then changes nothing,
+# and two concurrent makes no longer truncate the same file independently.
+BUILDINFO := $(ROOT)/.bin/.buildinfo
 GOLANGCI  := $(ROOT)/.bin/golangci-lint
 GOTESTSUM := $(ROOT)/.bin/gotestsum
 # Only hangar's own sources. A bare find over $(ROOT) would also sweep up the
@@ -46,14 +89,23 @@ GOTESTSUM := $(ROOT)/.bin/gotestsum
 SRC       := $(ROOT)/main.go $(shell find $(ROOT)/internal -name '*.go' 2>/dev/null)
 
 # Every Go path is redirected into the repo, so building hangar never touches
-# ~/go, ~/Library/Caches, or a Go the user happens to have installed.
+# ~/go, ~/Library/Caches, ~/.cache, or a Go the user happens to have installed.
 export GOROOT      := $(GOROOT_DIR)
 export GOPATH      := $(ROOT)/.gopath
 export GOMODCACHE  := $(ROOT)/.gopath/pkg/mod
 export GOCACHE     := $(ROOT)/.gocache
 export GOTOOLCHAIN := local
 export GOFLAGS     := -mod=vendor
+export GOLANGCI_LINT_CACHE := $(ROOT)/.gocache/golangci-lint
 export HANGAR_ROOT := $(ROOT)
+# Pinned on both platforms, for two different reasons: on a Mac it builds
+# hangar for its hardware even from a terminal running under Rosetta, so the
+# binary never runs translated; on either platform it overrides a `go env -w
+# GOARCH=...` left over from an unrelated project, which would otherwise
+# silently cross-compile the binary for that persisted architecture instead
+# of the host's own. The Go chosen above is native, so this never turns a
+# tool install into a cross-compile.
+export GOARCH      := $(GO_NATIVE_ARCH)
 # The pinned toolchain has to lead PATH, not just GOROOT: golangci-lint and
 # gotestsum shell out to whatever `go` they find, and finding an ambient one
 # under GOTOOLCHAIN=local fails outright rather than switching.
@@ -61,7 +113,7 @@ export PATH        := $(GOROOT_DIR)/bin:$(PATH)
 
 COUNTS := $(shell seq 0 32)
 
-.PHONY: help build watch update status kill check check-file-length lint test vendor stats clean nuke $(COUNTS)
+.PHONY: help build watch update status kill metrics metrics-stop check check-file-length lint test vendor stats clean nuke FORCE $(COUNTS)
 
 # ─── Fleet ────────────────────────────────────────────────────────────────────
 
@@ -71,22 +123,28 @@ COUNTS := $(shell seq 0 32)
 #
 # `make 0` skips the update and the dashboard: a tear-down installs no runner,
 # so making it wait on a download is a network round trip that can only fail.
-$(COUNTS): $(BIN) $(ROOT)/.env
+$(COUNTS): $(ROOT)/.env $(BIN)
 	@if [ "$@" != "0" ]; then $(BIN) update; fi
 	@$(BIN) scale $@
 	@if [ "$@" != "0" ]; then $(BIN) watch; fi
 
-watch: $(BIN) $(ROOT)/.env ## Dashboard only — never starts, stops or changes anything
+watch: $(ROOT)/.env $(BIN) ## Dashboard only — never starts, stops or changes anything
 	@$(BIN) watch
 
-update: $(BIN) $(ROOT)/.env ## Fetch the newest actions/runner release into .cache
+update: $(ROOT)/.env $(BIN) ## Fetch the newest actions/runner release into .cache
 	@$(BIN) update
 
-status: $(BIN) $(ROOT)/.env ## One-shot fleet summary, no TUI
+status: $(ROOT)/.env $(BIN) ## One-shot fleet summary, no TUI
 	@$(BIN) status
 
-kill: $(BIN) $(ROOT)/.env ## Stop and delete every worker locally, without GitHub
+kill: $(ROOT)/.env $(BIN) ## Stop and delete every worker locally, without GitHub
 	@$(BIN) kill
+
+metrics: $(ROOT)/.env $(BIN) ## Run the Prometheus exporter as a service; re-run after a rebuild
+	@$(BIN) metrics start
+
+metrics-stop: $(ROOT)/.env $(BIN) ## Stop and remove the exporter service
+	@$(BIN) metrics stop
 
 # ─── Checks ───────────────────────────────────────────────────────────────────
 
@@ -161,7 +219,7 @@ test: $(GOTESTSUM) ## Run unit tests
 stats: ## Show code statistics via scc, when it is installed
 	@command -v scc >/dev/null 2>&1 \
 		&& scc --no-cocomo $(ROOT)/internal $(ROOT)/main.go \
-		|| echo "scc not installed (brew install scc)"
+		|| echo "scc not installed (https://github.com/boyter/scc)"
 
 # ─── Build ────────────────────────────────────────────────────────────────────
 
@@ -177,6 +235,7 @@ clean: ## Drop build output and caches, keep workers and .env
 
 nuke: $(BIN) ## Stop and delete every worker, then remove all local state
 	@-$(BIN) scale 0
+	@-$(BIN) metrics stop
 	@rm -rf $(ROOT)/.bin $(ROOT)/.gocache $(ROOT)/.gopath $(ROOT)/.toolchain \
 	        $(ROOT)/.cache $(ROOT)/workers $(ROOT)/logs
 	@echo "removed everything except .env"
@@ -184,7 +243,7 @@ nuke: $(BIN) ## Stop and delete every worker, then remove all local state
 # ─── Help ─────────────────────────────────────────────────────────────────────
 
 help: ## Show this help
-	@echo "hangar — GitHub Actions runner fleet for one Mac"
+	@echo "hangar — GitHub Actions runner fleet for one machine"
 	@echo ""
 	@printf "\033[36m%-20s\033[0m %s\n" "<0-32>" "Scale the fleet to N workers, then open the dashboard"
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -194,9 +253,23 @@ help: ## Show this help
 
 # ─── Plumbing ─────────────────────────────────────────────────────────────────
 
-$(BIN): $(GO) $(SRC) go.mod
+# FORCE is a prerequisite with no rule of its own, so it is always considered
+# out of date; that makes $(BUILDINFO) re-run its recipe on every build, and
+# the cmp inside — not FORCE — decides whether the file actually needs
+# rewriting. This runs only when something needs $(BUILDINFO), so it is
+# skipped under `make -n` and by targets that don't depend on $(BIN).
+FORCE:
+
+$(BUILDINFO): FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(LDFLAGS)' | cmp -s - $@ 2>/dev/null || printf '%s\n' '$(LDFLAGS)' > $@
+
+# Built beside the old binary and renamed over it: running workers execute this
+# file as their docker credential helper, and a push that runs it mid-copy
+# would fail. A rename swaps it in one step.
+$(BIN): $(GO) $(SRC) go.mod $(BUILDINFO)
 	@mkdir -p $(dir $(BIN))
-	@$(GO) build -o $(BIN) .
+	@$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN).new . && mv -f $(BIN).new $(BIN)
 
 # A pinned toolchain rather than whatever `go` is on PATH: the build must be
 # reproducible on a machine that has no Go at all.
@@ -205,10 +278,12 @@ $(BIN): $(GO) $(SRC) go.mod
 # straight into tar: a piped archive is unpacked as it arrives, so there is no
 # point at which the contents could still be rejected.
 $(GO):
-	@echo "==> fetching go$(GO_VERSION) into .toolchain/"
+	@test -n "$(GO_SHA256)" || { echo "no pinned go$(GO_VERSION) checksum for $(GO_PLATFORM) — add GO_SHA256_$(GO_PLATFORM) to the Makefile"; exit 1; }
+	@[[ "$(GO_SHA256)" =~ ^[0-9a-f]{64}$$ ]] || { echo "GO_SHA256_$(GO_PLATFORM) is not a 64-character sha256 — refusing to trust it"; exit 1; }
+	@echo "==> fetching go$(GO_VERSION) ($(GO_PLATFORM)) into .toolchain/"
 	@mkdir -p $(ROOT)/.toolchain
-	@curl -fsSL -o $(ROOT)/.toolchain/go.tar.gz "https://go.dev/dl/go$(GO_VERSION).darwin-arm64.tar.gz"
-	@echo "$(GO_SHA256)  $(ROOT)/.toolchain/go.tar.gz" | shasum -a 256 -c - \
+	@curl -fsSL -o $(ROOT)/.toolchain/go.tar.gz "https://go.dev/dl/go$(GO_VERSION).$(GO_PLATFORM).tar.gz"
+	@echo "$(GO_SHA256)  $(ROOT)/.toolchain/go.tar.gz" | $(SHA256_CHECK) \
 		|| { rm -f $(ROOT)/.toolchain/go.tar.gz; echo "toolchain checksum mismatch — refusing to extract"; exit 1; }
 	@tar xzf $(ROOT)/.toolchain/go.tar.gz -C $(ROOT)/.toolchain
 	@rm -f $(ROOT)/.toolchain/go.tar.gz
@@ -224,8 +299,10 @@ $(GOTESTSUM): $(GO)
 	@echo "==> installing gotestsum $(GOTESTSUM_VERSION) into .bin/"
 	@GOFLAGS= GOBIN=$(ROOT)/.bin $(GO) install gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
 
-# First run bootstraps .env and stops, rather than failing deeper in with a
-# confusing error about a missing token.
+# First run bootstraps .env and stops, before a missing token can fail
+# anything deeper in with a confusing error. The fleet targets list it ahead
+# of $(BIN), so a fresh checkout gets its .env without first downloading a
+# toolchain or building — offline as well.
 $(ROOT)/.env:
 	@cp $(ROOT)/.env.example $(ROOT)/.env
 	@chmod 600 $(ROOT)/.env

@@ -30,8 +30,14 @@ type scaleDoneMsg struct {
 	err     error
 }
 
-// scaleBy nudges the desired worker count by delta.
+// scaleBy nudges the desired worker count by delta. Once a quit is pending the
+// target is committed to whatever the in-flight pass reaches, so a further
+// press changes nothing — the header would otherwise promise a worker the
+// dashboard has already decided not to chase.
 func (m *Model) scaleBy(delta int) tea.Cmd {
+	if m.quitting {
+		return nil
+	}
 	have := len(m.workers) // the last listing; polling the disk here would block
 	base := have
 	if m.scaling {
@@ -72,7 +78,7 @@ func (m *Model) startScale() tea.Cmd {
 		// Called from every provisioning goroutine at once. Dropping a stale line
 		// beats blocking a reconcile on a screen that is not draining, e.g. after
 		// the dashboard has quit.
-		err := m.flt.Scale(n, func(line string) {
+		err := m.flt.TryScale(n, func(line string) {
 			select {
 			case ch <- scaleMsg(line):
 			default:
@@ -89,8 +95,10 @@ func (m *Model) startScale() tea.Cmd {
 func (m *Model) scaleDone(msg scaleDoneMsg) tea.Cmd {
 	m.scaling, m.note = false, ""
 	m.refreshWorkers(msg.fleet)
-
 	if msg.err != nil {
+		// A failed pass keeps the dashboard open even after a quit was asked
+		// for: its error would otherwise vanish with the screen.
+		m.quitting = false
 		// Re-aim at reality: a failed pass leaves the fleet wherever it got to,
 		// and the next keypress should count from there rather than from a target
 		// that was never reached.
@@ -98,7 +106,19 @@ func (m *Model) scaleDone(msg scaleDoneMsg) tea.Cmd {
 		m.layout()
 		return nil
 	}
+	if m.quitting {
+		return m.quit()
+	}
 	if m.want != msg.reached {
+		// The busy check a keypress made is as old as the keypress; a worker the
+		// chase would now remove may have picked up a job since.
+		for _, w := range m.sorted() {
+			if w.Index > m.want && w.Busy {
+				m.want, m.scaleErr = len(msg.fleet), fmt.Sprintf("w%d is busy — not removing it", w.Index)
+				m.layout()
+				return nil
+			}
+		}
 		return m.startScale()
 	}
 	m.layout() // the worker table just changed height
@@ -126,15 +146,41 @@ func (m *Model) pendingLines() []string {
 	return out
 }
 
+// keysLegend is the footer's key legend. It drops "+/- scale" once a quit is
+// pending, since scaleBy refuses both keys from that point on.
+func (m *Model) keysLegend() string {
+	if m.quitting {
+		return "1-9 focus · a all · f follow · / filter · q quit (runners keep running)"
+	}
+	return "+/- scale · 1-9 focus · a all · f follow · / filter · q quit (runners keep running)"
+}
+
 // scaleNote is the footer's line about scaling: the target and the step it is
 // on while a pass runs, or the last error once one stopped.
 func (m *Model) scaleNote() string {
 	if !m.scaling {
 		return m.scaleErr
 	}
+	if m.quitting {
+		return "finishing the current scale before quitting · q again to quit now and abandon it (the next scale finishes the half-built worker)"
+	}
 	note := fmt.Sprintf("→ %d workers", m.want)
 	if m.note != "" {
 		note += " · " + m.note
 	}
 	return note + " · " + dur(time.Since(m.scaleSince))
+}
+
+// quit leaves the dashboard. A scale pass in flight is waited for on the first
+// press: its tar and config.sh would outlive the dashboard, and the next scale
+// would find the half-built worker and provision it a second time on top.
+func (m *Model) quit() tea.Cmd {
+	if m.scaling && !m.quitting {
+		m.quitting = true
+		return nil
+	}
+	if m.cancel != nil {
+		m.cancel()
+	}
+	return tea.Quit
 }

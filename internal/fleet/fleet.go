@@ -1,17 +1,18 @@
 // Package fleet provisions, registers and supervises the runner workers.
 //
-// hangar deliberately owns no long-running process of its own. launchd is the
-// supervisor: it starts workers at login, restarts them if they die, and keeps
-// them alive after the TUI exits. That is why `make watch` can be a pure reader
-// and why quitting it never touches a running build.
+// hangar deliberately owns no long-running process of its own. The operating
+// system's service manager is the supervisor — launchd on macOS, the user's
+// systemd manager on Linux: it starts workers at login or boot, restarts them
+// if they die, and keeps them alive after the TUI exits. That is why `make
+// watch` can be a pure reader and why quitting it never touches a running
+// build.
 package fleet
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/specialistvlad/hangar/internal/config"
@@ -33,74 +34,23 @@ func New(cfg *config.Config) *Fleet { return &Fleet{cfg: cfg} }
 // Config exposes the loaded settings for callers that need to display them.
 func (f *Fleet) Config() *config.Config { return f.cfg }
 
-// Worker is one provisioned runner.
-type Worker struct {
-	Index   int
-	Name    string
-	Dir     string
-	Running bool
-	PID     int
-}
-
-// List reports the workers that exist on disk. The directories are the state:
-// there is no separate registry file that could drift out of sync with them.
-func (f *Fleet) List() []Worker {
-	entries, err := os.ReadDir(f.cfg.WorkersDir())
-	if err != nil {
-		return nil
-	}
-	loaded := launchctlList()
-
-	var ws []Worker
-	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "w") {
-			continue
-		}
-		n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "w"))
-		if err != nil {
-			continue
-		}
-		pid := loaded[f.cfg.Label(n)]
-		ws = append(ws, Worker{
-			Index:   n,
-			Name:    f.cfg.WorkerName(n),
-			Dir:     f.cfg.WorkerDir(n),
-			Running: pid > 0,
-			PID:     pid,
-		})
-	}
-	sort.Slice(ws, func(i, j int) bool { return ws[i].Index < ws[j].Index })
-	return ws
-}
-
-// plan returns the worker indexes to create and to remove to reach n. Removals
-// are ordered highest-first so the fleet never has a gap mid-operation.
-func (f *Fleet) plan(n int) (add, drop []int) {
-	have := map[int]bool{}
-	for _, w := range f.List() {
-		have[w.Index] = true
-	}
-	for i := 1; i <= n; i++ {
-		if !have[i] {
-			add = append(add, i)
-		}
-	}
-	for i := range have {
-		if i > n {
-			drop = append(drop, i)
-		}
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(drop)))
-	return add, drop
-}
-
 // Scale reconciles the fleet to exactly n workers. It is a diff, not a rebuild:
 // running `scale 4` twice leaves the second run with nothing to do, and workers
 // that already exist are never torn down and recreated.
 //
 // Workers are provisioned in parallel, so progress may be called from several
 // goroutines at once.
-func (f *Fleet) Scale(n int, progress func(string)) error {
+func (f *Fleet) Scale(n int, progress func(string)) error { return f.scale(n, progress, true) }
+
+// ErrScaleBusy is TryScale's answer while another process is scaling.
+var ErrScaleBusy = errors.New("another scale is running — try again when it finishes")
+
+// TryScale is Scale without waiting for a scale already running elsewhere. A
+// dashboard keypress must not queue behind another process: by the time it ran,
+// the checks that allowed it — no busy worker above the target — would be stale.
+func (f *Fleet) TryScale(n int, progress func(string)) error { return f.scale(n, progress, false) }
+
+func (f *Fleet) scale(n int, progress func(string), wait bool) error {
 	if n < 0 || n > config.MaxWorkers {
 		return fmt.Errorf("worker count must be 0-%d", config.MaxWorkers)
 	}
@@ -109,8 +59,21 @@ func (f *Fleet) Scale(n int, progress func(string)) error {
 			return err
 		}
 	}
+	// One scale at a time across processes. A dashboard's +/- and a `make N`
+	// in another terminal are both expected; two passes planning against the
+	// same half-built worker would provision it twice and each tear down the
+	// other's. Kill takes no lock — it is the escape hatch when this one hangs.
+	unlock, err := lockScale(f.lockPath(), progress, wait)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
-	add, drop := f.plan(n)
+	ws, err := f.checkedList(n)
+	if err != nil {
+		return err
+	}
+	add, drop := plan(n, ws)
 	if len(add) == 0 && len(drop) == 0 {
 		progress(fmt.Sprintf("already at %d worker(s)", n))
 		return nil
@@ -137,6 +100,11 @@ func (f *Fleet) Scale(n int, progress func(string)) error {
 		return nil
 	}
 
+	// Checked before anything is registered: a worker the supervisor cannot keep
+	// alive would otherwise show up on GitHub and then quietly go offline.
+	if err := f.preflight(); err != nil {
+		return err
+	}
 	tarball, err := f.CachedTarball()
 	if err != nil {
 		return err
@@ -146,28 +114,57 @@ func (f *Fleet) Scale(n int, progress func(string)) error {
 		return err
 	}
 	return each(add, func(i int) error {
-		if err := f.provision(i, tarball, token, progress); err != nil {
-			return fmt.Errorf("creating w%d: %w", i, err)
+		started, err := f.provision(i, tarball, token, progress)
+		if err == nil {
+			return nil
 		}
-		return nil
+		// A worker whose service already started is left running: migrateMarkers
+		// backfills its marker on the next scale, the same trust it already gives
+		// a pre-existing worker in this state. Stopping it here over a failure as
+		// late as the marker write would kill an otherwise healthy worker.
+		if !started {
+			f.stopService(i)
+		}
+		// A worker GitHub already accepted is left on disk, so `make 0` can still
+		// unregister it and the next scale completes it in place. One that never
+		// registered holds nothing worth keeping.
+		if exists(filepath.Join(f.cfg.WorkerDir(i), ".runner")) {
+			return fmt.Errorf("creating w%d: %w (left registered: the next scale finishes it, `make 0` removes it)", i, err)
+		}
+		if rmErr := f.removeWorker(i); rmErr != nil {
+			return fmt.Errorf("creating w%d: %w (and cleaning up: %v)", i, err, rmErr)
+		}
+		return fmt.Errorf("creating w%d: %w", i, err)
 	})
 }
 
-// provision unpacks, registers and starts one worker.
-func (f *Fleet) provision(n int, tarball, token string, progress func(string)) error {
+// provision unpacks, registers and starts one worker — or, for a worker an
+// earlier pass registered but did not finish, just the steps after
+// registration: running config.sh again would fail with "already configured".
+// It reports whether startService succeeded, so a caller that sees a later
+// error — the marker write is the only step left after that — knows the
+// worker is already live and must not be stopped.
+func (f *Fleet) provision(n int, tarball, token string, progress func(string)) (started bool, err error) {
 	dir := f.cfg.WorkerDir(n)
 	progress(fmt.Sprintf("creating %s", f.cfg.WorkerName(n)))
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return false, err
 	}
-	// bsdtar rather than archive/tar: the runner ships symlinks and execute
-	// bits that the stdlib reader would need hand-rolled handling for.
-	if out, err := run(dir, "tar", "xzf", tarball); err != nil {
-		return fmt.Errorf("extract: %v: %s", err, out)
+	// Anything that can fail about the worker's TMPDIR fails here, before
+	// GitHub knows the worker exists.
+	if err := f.prepareTmp(n); err != nil {
+		return false, err
 	}
-	if out, err := runSecret(dir, tokenEnv(token), "./config.sh", f.registerArgs(n)...); err != nil {
-		return fmt.Errorf("register: %v: %s", err, out)
+	if !exists(filepath.Join(dir, ".runner")) {
+		// The system tar rather than archive/tar: the runner ships symlinks and
+		// execute bits that the stdlib reader would need hand-rolled handling for.
+		if out, err := run(dir, "tar", "xzf", tarball); err != nil {
+			return false, fmt.Errorf("extract: %v: %s", err, out)
+		}
+		if out, err := runSecret(dir, tokenEnv(token), "./config.sh", f.registerArgs(n)...); err != nil {
+			return false, fmt.Errorf("register: %v: %s", err, out)
+		}
 	}
 	// Both of these must follow registration, not precede it. config.sh runs the
 	// runner's env.sh, which appends whatever LANG/NVM_BIN/JAVA_HOME happen to be
@@ -175,12 +172,15 @@ func (f *Fleet) provision(n int, tarball, token string, progress func(string)) e
 	// environment. Writing ours afterwards is what keeps a worker deterministic
 	// rather than a snapshot of whoever ran `make`.
 	if err := f.writeIsolation(n); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".path"), []byte(f.runnerPath(n)+"\n"), 0o644); err != nil {
-		return err
+		return false, err
 	}
-	return f.startService(n)
+	if err := f.startService(n); err != nil {
+		return false, err
+	}
+	return true, os.WriteFile(filepath.Join(dir, readyMarker), nil, 0o644)
 }
 
 // tokenEnv passes a short-lived runner token to config.sh out of band. See
@@ -204,9 +204,10 @@ func (f *Fleet) registerArgs(n int) []string {
 }
 
 // labels is what a workflow targets with `runs-on: [self-hosted, hangar]`. The
-// runner's own defaults — self-hosted, macOS, ARM64 — describe the machine, not
-// who manages it, so in an org where Macs are registered by hand as well as by
-// hangar they cannot pick out the fleet. Applying it here rather than through
+// runner's own defaults — self-hosted plus the OS and architecture, such as
+// macOS and ARM64 — describe the machine, not who manages it, so in an org
+// where machines are registered by hand as well as by hangar they cannot pick
+// out the fleet. Applying it here rather than through
 // RUNNER_LABELS means the fleet is addressable on a stock install, and stays so
 // when an operator sets labels of their own.
 func labels(extra string) string {
@@ -230,5 +231,7 @@ func (f *Fleet) deprovision(n int, token string, progress func(string)) error {
 	if _, err := os.Stat(filepath.Join(dir, "config.sh")); err == nil {
 		_, _ = runSecret(dir, tokenEnv(token), "./config.sh", "remove")
 	}
-	return os.RemoveAll(dir)
+	return f.removeWorker(n)
 }
+
+func (f *Fleet) lockPath() string { return filepath.Join(f.cfg.WorkersDir(), ".scale.lock") }

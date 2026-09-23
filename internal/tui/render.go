@@ -89,9 +89,9 @@ func (m *Model) render() {
 	}
 }
 
-// headerLines renders the title and the two resource rows. The docker VM gets
-// its own row because that is where build CPU actually lands — the runner
-// processes themselves sit near idle while BuildKit does the work.
+// headerLines renders the title and the two resource rows. Docker gets its own
+// row because that is where build CPU actually lands — the runner processes
+// themselves sit near idle while BuildKit does the work.
 func (m *Model) headerLines() []string {
 	cfg := m.flt.Config()
 	busy := 0
@@ -110,23 +110,26 @@ func (m *Model) headerLines() []string {
 		stDim.Render(fmt.Sprintf(" · %d busy · %s/%s", busy, cfg.Org, orDash(cfg.Group)))
 
 	s := m.frame
-	host := fmt.Sprintf("%s  load %s %-5.2f   mem %s %s/%s   free %s",
+	host := fmt.Sprintf("%s  load %s %-5.2f   mem %s %s/%s   free %s %s",
 		stDim.Render("host  "),
 		metrics.Sparkline(m.frame.Load, sparkWidth, float64(s.NCPU)),
 		s.Load1,
 		metrics.Sparkline(m.frame.Mem, sparkWidth, 100),
 		gib(s.MemUsed), gib(s.MemTotal),
-		diskStyle(s.DiskFree).Render(gib(s.DiskFree)),
+		diskStyle(s.DiskLevel).Render(gib(s.DiskFree)), stDim.Render(s.DiskLabel),
 	)
 
-	vm := stDim.Render("docker") + "  " + stDim.Render("not running")
-	if s.VMFound {
-		vm = fmt.Sprintf("%s  cpu  %s %-5.0f%%  mem %s",
+	docker := stDim.Render("docker") + "  " + stDim.Render("not running")
+	switch {
+	case s.DockerUnavailable != "":
+		docker = stDim.Render("docker") + "  " + stDim.Render("n/a ("+s.DockerUnavailable+")")
+	case s.DockerFound:
+		docker = fmt.Sprintf("%s  cpu  %s %-5.0f%%  mem %s",
 			stDim.Render("docker"),
-			metrics.Sparkline(m.frame.VM, sparkWidth, float64(s.NCPU)*100),
-			s.VMCPU, gib(s.VMMem))
+			metrics.Sparkline(m.frame.Docker, sparkWidth, float64(s.NCPU)*100),
+			s.DockerCPU, gib(s.DockerMem))
 	}
-	return []string{title, host, vm}
+	return []string{title, host, docker}
 }
 
 // workerLines renders one row per worker: state, current job, elapsed time.
@@ -169,7 +172,7 @@ func (m *Model) View() string {
 	}
 	rule := stRule.Render(strings.Repeat("─", maxInt(m.w, 1)))
 
-	footer := stDim.Render(" +/- scale · 1-9 focus · a all · f follow · / filter · q quit (runners keep running)")
+	footer := stDim.Render(" " + m.keysLegend())
 	if m.filtering {
 		footer = " " + m.filter.View()
 	} else if m.focus != 0 {
@@ -196,12 +199,13 @@ func (m *Model) View() string {
 	return strings.Join(parts, "\n")
 }
 
-// diskStyle turns free space into a warning color before a build hits ENOSPC.
-func diskStyle(free uint64) lipgloss.Style {
-	switch {
-	case free < 30<<30:
+// diskStyle turns low free space into a warning color before a build hits
+// ENOSPC. The level is judged against the disk's own size; see metrics.
+func diskStyle(level int) lipgloss.Style {
+	switch level {
+	case metrics.DiskCritical:
 		return stErr
-	case free < 80<<30:
+	case metrics.DiskLow:
 		return stWarn
 	}
 	return stBase
