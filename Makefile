@@ -67,7 +67,13 @@ BIN       := $(ROOT)/.bin/hangar
 # there is one. Outside a git checkout both are unknown, not dirty.
 HANGAR_HEAD    := $(shell git -C $(ROOT) rev-parse --short=12 HEAD 2>/dev/null)
 HANGAR_COMMIT  := $(if $(HANGAR_HEAD),$(HANGAR_HEAD)$(if $(shell git -C $(ROOT) status --porcelain 2>/dev/null),-dirty),unknown)
-HANGAR_VERSION := $(shell git -C $(ROOT) describe --tags --always 2>/dev/null || echo dev)
+# A git tag name can carry shell metacharacters (quotes, backticks, ;, |, &)
+# that would otherwise reach LDFLAGS verbatim below, in both the build
+# recipe's -ldflags string and $(BUILDINFO)'s comparison; tr keeps only a
+# safe charset, and semver-with-suffix tags like v1.2.3-4-gabc1234 already
+# live entirely inside it.
+HANGAR_VERSION := $(strip $(shell git -C $(ROOT) describe --tags --always 2>/dev/null | tr -cd 'A-Za-z0-9._+-'))
+HANGAR_VERSION := $(if $(HANGAR_VERSION),$(HANGAR_VERSION),dev)
 LDFLAGS   := -X main.version=$(HANGAR_VERSION) -X main.commit=$(HANGAR_COMMIT)
 # The stamp is rewritten only when it changes, and the binary depends on it:
 # a commit or a clean-up alone must rebuild, or build_info would name a
