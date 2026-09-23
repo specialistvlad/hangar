@@ -42,6 +42,7 @@ type workerState struct {
 	info    logs.JobInfo
 	infoOK  bool
 	tries   int
+	logPath string // the pending job's Worker_*.log, once resolved; skips re-globbing _diag on later polls
 	jobs    map[string]uint64 // result -> count since the exporter started
 }
 
@@ -116,7 +117,7 @@ func (c *Collector) Apply(e logs.Event) {
 	switch e.Kind {
 	case logs.KindJobStart:
 		w.busy, w.job, w.start = true, e.Text, at
-		w.info, w.infoOK, w.tries = logs.JobInfo{}, false, 0
+		w.info, w.infoOK, w.tries, w.logPath = logs.JobInfo{}, false, 0, ""
 	case logs.KindJobEnd:
 		if !e.Recovered {
 			r := resultOf(e.Result)
@@ -126,7 +127,7 @@ func (c *Collector) Apply(e logs.Event) {
 			}
 		}
 		w.busy, w.job, w.start, w.lastEnd = false, "", time.Time{}, at
-		w.info, w.infoOK = logs.JobInfo{}, false
+		w.info, w.infoOK, w.logPath = logs.JobInfo{}, false, ""
 	case logs.KindListening:
 		w.idle()
 	case logs.KindLine:
@@ -137,7 +138,7 @@ func (c *Collector) Apply(e logs.Event) {
 // that is no longer running, has no job, whether or not it logged an end.
 func (w *workerState) idle() {
 	w.busy, w.job, w.start = false, "", time.Time{}
-	w.info, w.infoOK, w.tries = logs.JobInfo{}, false, 0
+	w.info, w.infoOK, w.tries, w.logPath = logs.JobInfo{}, false, 0, ""
 }
 
 // notUp clears a worker's dashboard-facing busy state when the supervisor
@@ -152,30 +153,41 @@ func (w *workerState) notUp() {
 	w.info, w.infoOK, w.tries = logs.JobInfo{}, false, 0
 }
 
+// PendingJob is a busy worker whose job's repository and run are not known
+// yet: its start, for the lookup, and the Worker_*.log a previous lookup
+// resolved for it, if any, so the caller can skip resolving it again while
+// no fuller message has appeared there.
+type PendingJob struct {
+	Start   time.Time
+	LogPath string
+}
+
 // PendingInfo lists the busy workers whose job's repository and run are not
-// known yet, with the start of that job.
-func (c *Collector) PendingInfo() map[int]time.Time {
+// known yet.
+func (c *Collector) PendingInfo() map[int]PendingJob {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := map[int]time.Time{}
+	out := map[int]PendingJob{}
 	for n, w := range c.workers {
 		if w.busy && !w.infoOK && w.tries < infoAttempts {
-			out[n] = w.start
+			out[n] = PendingJob{Start: w.start, LogPath: w.logPath}
 		}
 	}
 	return out
 }
 
 // SetJobInfo records a lookup for the job that started on worker n at start —
-// the result if found, one more attempt if not. A job that has meanwhile ended
-// or been replaced is left alone.
-func (c *Collector) SetJobInfo(n int, start time.Time, info logs.JobInfo, found bool) {
+// the result if found, the worker log resolved for it either way so the next
+// lookup does not glob _diag again, one more attempt if not found. A job that
+// has meanwhile ended or been replaced is left alone.
+func (c *Collector) SetJobInfo(n int, start time.Time, info logs.JobInfo, path string, found bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	w := c.workers[n]
 	if w == nil || !w.busy || !w.start.Equal(start) {
 		return
 	}
+	w.logPath = path
 	if found {
 		w.info, w.infoOK = info, true
 		return

@@ -64,7 +64,7 @@ func TestCollectorLifecycle(t *testing.T) {
 		`hangar_worker_job_start_timestamp_seconds{worker="w1",runner="box-w1"} 1790133175`,
 	)
 
-	c.SetJobInfo(1, start, logs.JobInfo{Name: "build (x)", Repo: "Acme/app", Workflow: "All", RunID: "42"}, true)
+	c.SetJobInfo(1, start, logs.JobInfo{Name: "build (x)", Repo: "Acme/app", Workflow: "All", RunID: "42"}, "/diag/Worker_x.log", true)
 	mustHave(t, render(c),
 		`hangar_worker_job_info{worker="w1",runner="box-w1",job_name="build (x)",workflow="All",repo="Acme/app",run_id="42"} 1`)
 
@@ -142,17 +142,43 @@ func TestSetJobInfoGuards(t *testing.T) {
 	first := time.Unix(1000, 0)
 	c.Apply(logs.Event{Worker: 1, Kind: logs.KindJobStart, Text: "a", At: first})
 	c.Apply(logs.Event{Worker: 1, Kind: logs.KindJobStart, Text: "b", At: first.Add(time.Minute)})
-	c.SetJobInfo(1, first, logs.JobInfo{Repo: "stale/repo"}, true)
+	c.SetJobInfo(1, first, logs.JobInfo{Repo: "stale/repo"}, "/diag/Worker_a.log", true)
 	mustNotHave(t, render(c), "stale/repo")
 
 	for i := 0; i < infoAttempts; i++ {
 		if _, pending := c.PendingInfo()[1]; !pending {
 			t.Fatalf("gave up after %d attempts, want %d", i, infoAttempts)
 		}
-		c.SetJobInfo(1, first.Add(time.Minute), logs.JobInfo{}, false)
+		c.SetJobInfo(1, first.Add(time.Minute), logs.JobInfo{}, "/diag/Worker_b.log", false)
 	}
 	if _, pending := c.PendingInfo()[1]; pending {
 		t.Error("lookups should stop after infoAttempts misses")
+	}
+}
+
+// PendingInfo hands back the worker log a previous SetJobInfo resolved, so a
+// caller can skip resolving it again — globbing _diag once per job rather
+// than once per unresolved poll — while the job's message is still being
+// written.
+func TestPendingInfoCachesLogPath(t *testing.T) {
+	c := NewCollector("v", "c")
+	c.SetFleet([]fleet.Worker{{Index: 1, Name: "w", Registered: true, Running: true}})
+	start := time.Unix(1000, 0)
+	c.Apply(logsStart(1, start))
+
+	if p := c.PendingInfo()[1]; p.LogPath != "" {
+		t.Fatalf("no lookup made yet: got LogPath %q", p.LogPath)
+	}
+	c.SetJobInfo(1, start, logs.JobInfo{}, "/diag/Worker_x.log", false)
+	p, pending := c.PendingInfo()[1]
+	if !pending || p.LogPath != "/diag/Worker_x.log" {
+		t.Fatalf("got %+v, want the resolved path carried forward", p)
+	}
+
+	// A new job must not inherit the previous one's path.
+	c.Apply(logsStart(1, start.Add(time.Minute)))
+	if p := c.PendingInfo()[1]; p.LogPath != "" {
+		t.Fatalf("a new job must start without a cached path, got %q", p.LogPath)
 	}
 }
 

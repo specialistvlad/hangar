@@ -77,9 +77,9 @@ func serve(ctx context.Context, ln net.Listener, c *Collector, list func() ([]fl
 			c.SetFleet(ws)
 		}
 		follow(ctx, ws, watching, events)
-		for n, start := range c.PendingInfo() {
-			info, ok := logs.FindJobInfo(workerDir(n), start)
-			c.SetJobInfo(n, start, info, ok)
+		for n, p := range c.PendingInfo() {
+			info, path, ok := logs.FindJobInfo(workerDir(n), p.Start, p.LogPath)
+			c.SetJobInfo(n, p.Start, info, path, ok)
 		}
 		select {
 		case <-ctx.Done():

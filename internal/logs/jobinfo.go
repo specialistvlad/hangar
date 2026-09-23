@@ -31,14 +31,21 @@ var reWorkerLog = regexp.MustCompile(`Worker_(\d{8}-\d{6})-utc\.log$`)
 const workerLogWindow = 30 * time.Second
 
 // FindJobInfo reads the job message of the job that started on the worker at
-// start. It reports false while that job's worker log is not there yet, or not
-// yet written far enough to parse — callers retry.
-func FindJobInfo(workerDir string, start time.Time) (JobInfo, bool) {
-	path := workerLogFor(filepath.Join(workerDir, "_diag"), start)
+// start. path is the worker log an earlier call resolved for this job, or
+// empty on the first one; it is looked up again only when empty, so a job
+// already found in _diag is not globbed for again while its message is still
+// being written. It reports false while no worker log is there yet, or one
+// is but not yet written far enough to parse — callers retry, passing the
+// returned path back in either way.
+func FindJobInfo(workerDir string, start time.Time, path string) (JobInfo, string, bool) {
 	if path == "" {
-		return JobInfo{}, false
+		path = workerLogFor(filepath.Join(workerDir, "_diag"), start)
+		if path == "" {
+			return JobInfo{}, "", false
+		}
 	}
-	return readJobMessage(path)
+	info, ok := readJobMessage(path)
+	return info, path, ok
 }
 
 // workerLogFor picks the worker log that began closest after start.
