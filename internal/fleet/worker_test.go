@@ -344,8 +344,25 @@ func TestCheckTmpRootRefusesWorldWritableRootItself(t *testing.T) {
 	if err := os.Chmod(root, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkTmpRoot(root); err == nil {
-		t.Error("a world-writable root itself must be refused")
+	real, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = checkTmpRoot(root)
+	if err == nil {
+		t.Fatal("a world-writable root itself must be refused")
+	}
+	// t.TempDir() can itself sit under a world-writable ancestor (a
+	// container's /tmp is commonly mode 1777), and checkTmpRoot always
+	// echoes the original root as the error's first %s regardless of which
+	// directory the walk actually flagged — so a plain Contains(err, real)
+	// would pass even if the walk flagged /tmp two levels up instead of
+	// root itself. The second %s is the flagged directory; only that one
+	// tells the two apart, so a loop that starts one level too high — at
+	// filepath.Dir(real) instead of real — cannot pass here by coincidence.
+	flagged := "is, or is inside, " + real + ","
+	if !strings.Contains(err.Error(), flagged) {
+		t.Errorf("error %q does not flag the root itself (%s):\nwant to contain %q", err, real, flagged)
 	}
 }
 
