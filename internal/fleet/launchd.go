@@ -91,10 +91,14 @@ func serviceName(n int) string { return fmt.Sprintf("com.hangar.w%d", n) }
 // a kill reach an agent whose worker directory has already gone.
 var labelIndex = regexp.MustCompile(`^com\.hangar\.w(\d+)$`)
 
-// preflight has nothing to check on macOS: a launchd agent in the GUI domain
-// starts at login by construction, and Docker Desktop's socket belongs to the
-// user who runs it.
-func (f *Fleet) preflight() error { return nil }
+// preflight refuses to provision workers that would register on GitHub and
+// then never run: a launchd agent in the GUI domain starts at login by
+// construction, and Docker Desktop's socket belongs to the user who runs it,
+// so the one thing left to catch here is a path or name the plist cannot
+// carry — the same check Linux's preflight runs.
+func (f *Fleet) preflight() error {
+	return checkUnitPaths(f.cfg.Root, f.cfg.TmpRoot, f.cfg.NamePrefix)
+}
 
 // plistPath is where hangar writes agents outside its own folder: launchd only
 // loads agents at login from ~/Library/LaunchAgents, and reboot survival is

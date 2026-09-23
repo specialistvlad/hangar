@@ -58,20 +58,6 @@ func TestRenderUnitEscapesPaths(t *testing.T) {
 	}
 }
 
-// A path systemd cannot hold in a unit line — a control character, or bytes
-// that are not UTF-8 — is refused before anything is registered, rather than
-// producing a unit that never loads.
-func TestUnitPathsRejectWhatUnitsCannotHold(t *testing.T) {
-	if err := checkUnitPaths("/srv/hangar", "/mnt/tmp $x"); err != nil {
-		t.Errorf("an ordinary path was refused: %v", err)
-	}
-	for _, bad := range []string{"/srv/han\ngar", "/srv/\tx", "/srv/\x7f", "/srv/caf\xff"} {
-		if err := checkUnitPaths(bad, ""); err == nil {
-			t.Errorf("checkUnitPaths(%q) should fail", bad)
-		}
-	}
-}
-
 // `systemctl show` prints one block per unit. Units hangar does not own come
 // back from a pattern too, a unit can be named twice, and a unit that is loaded
 // but not running reports MainPID=0 — a kill must still reach it.

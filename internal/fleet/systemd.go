@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
 
 // systemd is hangar's supervisor on Linux, in the form of per-user units run by
@@ -45,7 +44,7 @@ func (f *Fleet) preflight() error {
 	if err != nil {
 		return err
 	}
-	if err := checkUnitPaths(f.cfg.Root, f.cfg.TmpRoot); err != nil {
+	if err := checkUnitPaths(f.cfg.Root, f.cfg.TmpRoot, f.cfg.NamePrefix); err != nil {
 		return err
 	}
 	return f.checkDockerAccess(u.Username)
@@ -66,19 +65,6 @@ func (f *Fleet) supervisorReady() error {
 	}
 	if out, err := systemctl(systemctlTimeout, "show", "--property=Version"); err != nil {
 		return fmt.Errorf("cannot reach %s's systemd user manager: %v: %s", u.Username, err, strings.TrimSpace(out))
-	}
-	return nil
-}
-
-// checkUnitPaths refuses paths that cannot be written into a unit file. A unit
-// setting is one line of UTF-8, and systemd drops a setting that holds a
-// control character or invalid UTF-8 — so a worker under such a path would
-// register and then never load.
-func checkUnitPaths(paths ...string) error {
-	for _, p := range paths {
-		if !utf8.ValidString(p) || strings.IndexFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
-			return fmt.Errorf("%q holds a control character or invalid UTF-8, which a systemd unit cannot carry — move hangar to a plain path", p)
-		}
 	}
 	return nil
 }
