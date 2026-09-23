@@ -49,7 +49,7 @@ func TestRenderPlist(t *testing.T) {
 	}
 	for _, want := range []string{
 		"<string>/bin/sh</string>",
-		`[ ! -L &#34;$1&#34; ] &amp;&amp; [ -O &#34;$1&#34; ] &amp;&amp; [ -O &#34;${1%/*}&#34; ]`,
+		`[ -O &#34;${1%/*}&#34; ] &amp;&amp; chmod go-w &#34;${1%/*}&#34; &amp;&amp; [ -d &#34;$1&#34; ] &amp;&amp; [ ! -L &#34;$1&#34; ] &amp;&amp; [ -O &#34;$1&#34; ]`,
 		"exit 78; }; exec &#34;$2&#34;</string>",
 		"<string>/Volumes/ram/w2</string>",
 		"<string>/Users/me/hangar &amp; co/workers/w2/runsvc.sh</string>",

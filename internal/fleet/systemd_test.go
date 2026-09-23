@@ -21,7 +21,7 @@ func TestRenderUnitKeepsTheWorkerAlive(t *testing.T) {
 		"Type=exec",
 		"WorkingDirectory=/srv/hangar/workers/w3",
 		`ExecStartPre=/bin/sh -c "[ ! -L \"$${1%%/*}\" ] && mkdir -p \"$$1\" && `,
-		`[ -O \"$${1%%/*}\" ]`,
+		`[ -O \"$${1%%/*}\" ] && chmod go-w \"$${1%%/*}\" && [ -d \"$$1\" ] && [ ! -L \"$$1\" ] && [ -O \"$$1\" ]`,
 		`exit 78; }" sh "/tmp/hangar/w3"`,
 		"Restart=always",
 		"KillMode=process",

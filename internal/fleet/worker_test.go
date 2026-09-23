@@ -225,6 +225,75 @@ func TestCheckTmpRootRefusesSharedParents(t *testing.T) {
 	}
 }
 
+// checkTmpRoot must refuse a WORKER_TMP_ROOT that is itself writable by every
+// account, not only one nested inside such a directory — a tmpfs mounted
+// mode=1777, or /dev/shm handed straight to WORKER_TMP_ROOT.
+func TestCheckTmpRootRefusesWorldWritableRootItself(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "shared-root")
+	if err := os.Mkdir(root, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkTmpRoot(root); err == nil {
+		t.Error("a world-writable root itself must be refused")
+	}
+}
+
+// The guard locks the parent down — chmod go-w — before it trusts $1, so a
+// TMPDIR whose parent starts out group/other-writable ends up private rather
+// than only ever having $1 itself locked down. Checking $1 before closing the
+// parent would leave a window for whoever still had write access to the
+// parent to swap $1 out from under the check.
+func TestTmpGuardPrivatesParentBeforeTrustingTmp(t *testing.T) {
+	sh := func(tmp string) error {
+		return exec.CommandContext(t.Context(), "/bin/sh", "-c", tmpGuard, "sh", tmp).Run()
+	}
+
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(root, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(root, "w1")
+	if err := sh(tmp); err != nil {
+		t.Fatalf("fresh TMPDIR under a permissive parent refused: %v", err)
+	}
+	if fi, err := os.Stat(root); err != nil || fi.Mode().Perm()&0o022 != 0 {
+		t.Errorf("parent mode = %v, %v, want go-w cleared", fi, err)
+	}
+	if fi, err := os.Stat(tmp); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("TMPDIR mode = %v, %v, want 0700", fi, err)
+	}
+
+	// A symlink planted at $1 while the parent was still writable must still
+	// be refused, even though the parent itself now passes every check.
+	link := filepath.Join(root, "w2")
+	if err := os.Chmod(root, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Fatal(err)
+	}
+	if err := sh(link); err == nil {
+		t.Error("a symlinked TMPDIR under a permissive parent must stop the worker")
+	}
+
+	// A parent this account does not own, even one it can create $1 under —
+	// /tmp is world-writable but root's — must be refused rather than have
+	// its mode changed by the chmod that now runs before $1 is checked.
+	if os.Getuid() != 0 {
+		foreignParent := filepath.Join("/tmp", fmt.Sprintf("hangar-guard-%d-%d", os.Getpid(), time.Now().UnixNano()))
+		t.Cleanup(func() { _ = os.Remove(foreignParent) })
+		if err := sh(foreignParent); err == nil {
+			t.Error("a TMPDIR in a directory owned by someone else must stop the worker")
+		}
+		if fi, err := os.Stat("/tmp"); err != nil || fi.Mode().Perm()&0o022 == 0 {
+			t.Errorf("/tmp mode = %v, %v, must not have been chmod'd by a check that should have stopped first", fi, err)
+		}
+	}
+}
+
 // Removing a worker deletes its TMPDIR under WORKER_TMP_ROOT, but never follows
 // a symlink planted there into somewhere else.
 func TestRemoveWorkerLeavesForeignTmpAlone(t *testing.T) {

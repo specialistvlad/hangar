@@ -11,12 +11,16 @@ import (
 // empty after a reboot — and refuses to start the worker unless the directory
 // and its parent both belong to this account and neither is a symlink:
 // whoever controls the parent can swap the directory, and with it any script a
-// job writes there, while the runner uses it. The parent is checked for a
-// symlink after mkdir too, since that is the state the runner will use. Shell
+// job writes there, while the runner uses it. The parent is locked down —
+// chmod go-w — before $1 is trusted, and only then is $1 itself checked and
+// chmod 0700: checking $1 first and closing the parent after would leave a
+// window, between the two, for whoever still had write access to the parent
+// to swap $1 out from under the check. The parent is checked for a symlink
+// again after mkdir too, since that is the state the runner will use. Shell
 // builtins only, so it behaves the same under dash and macOS sh; BSD install
 // exits 0 when its chmod fails, so it is not used.
-const tmpGuard = `[ ! -L "${1%/*}" ] && mkdir -p "$1" && [ ! -L "${1%/*}" ] && [ -d "$1" ] && [ ! -L "$1" ] && ` +
-	`[ -O "$1" ] && [ -O "${1%/*}" ] && chmod 0700 "$1" && chmod go-w "${1%/*}" || ` +
+const tmpGuard = `[ ! -L "${1%/*}" ] && mkdir -p "$1" && [ ! -L "${1%/*}" ] && [ -O "${1%/*}" ] && ` +
+	`chmod go-w "${1%/*}" && [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && chmod 0700 "$1" || ` +
 	`{ echo "hangar: refusing TMPDIR $1 - it must be a directory, not a symlink, owned by this account, inside a directory this account owns" >&2; exit 78; }`
 
 // prepareTmp creates worker n's TMPDIR and checks it the way tmpGuard will at
@@ -38,8 +42,9 @@ func (f *Fleet) prepareTmp(n int) error {
 	return claimDir(tmp, 0o077)
 }
 
-// checkTmpRoot refuses a WORKER_TMP_ROOT inside a directory every account can
-// write to — /tmp, /var/tmp, /dev/shm and the like. The system's tmp cleaner
+// checkTmpRoot refuses a WORKER_TMP_ROOT that is itself, or sits inside, a
+// directory every account can write to — /tmp, /var/tmp, /dev/shm and the
+// like, or a tmpfs mounted with a permissive mode. The system's tmp cleaner
 // sweeps those while workers run, deleting an idle worker's TMPDIR between
 // starts, and once the root itself is gone any other account can recreate it
 // and the workers' directories under it, with no start for tmpGuard to catch
@@ -52,14 +57,15 @@ func checkTmpRoot(root string) error {
 	if err != nil {
 		return err
 	}
-	for dir := filepath.Dir(real); ; dir = filepath.Dir(dir) {
+	for dir := real; ; dir = filepath.Dir(dir) {
 		fi, err := os.Stat(dir)
 		if err != nil {
 			return err
 		}
 		if fi.Mode().Perm()&0o002 != 0 {
-			return fmt.Errorf("WORKER_TMP_ROOT %s is inside %s, which every account can write to — "+
-				"use a directory or mount only this account controls", root, dir)
+			return fmt.Errorf("WORKER_TMP_ROOT %s is, or is inside, %s, which every account can write to — "+
+				"use a directory or mount only this account can write to (e.g. mount a tmpfs with "+
+				"mode=0700,uid=<fleet user>)", root, dir)
 		}
 		if dir == filepath.Dir(dir) {
 			return nil
