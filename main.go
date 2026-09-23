@@ -152,10 +152,16 @@ func metrics(f *fleet.Fleet, args []string) error {
 	}
 	switch args[0] {
 	case "start":
+		addr := f.Config().MetricsAddr
+		// A hostname METRICS_ADDR names but cannot reach fails here, in seconds,
+		// rather than after the service is written and WaitServing's poll below
+		// spends its whole 15-second budget finding the same thing out.
+		if err := config.CheckHostResolves(addr, 3*time.Second); err != nil {
+			return err
+		}
 		if err := f.StartMetrics(); err != nil {
 			return err
 		}
-		addr := f.Config().MetricsAddr
 		if err := exporter.WaitServing(context.Background(), addr, version, commit, 15*time.Second); err != nil {
 			return fmt.Errorf("the exporter service started but is not serving %s: %v — its log, %s, says why; "+
 				"it keeps retrying until `make metrics-stop`", addr, err, filepath.Join(f.Config().LogsDir(), "metrics.log"))
