@@ -23,7 +23,7 @@ can be developed and tested without one.
 ```bash
 git clone https://github.com/specialistvlad/hangar.git
 cd hangar
-make            # prints help, creates .env from the template on first run
+make status     # first run creates .env from the template and stops
 make check      # vet + lint + file-length + tests
 ```
 
