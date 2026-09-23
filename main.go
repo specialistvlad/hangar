@@ -160,7 +160,7 @@ func metrics(f *fleet.Fleet, args []string) error {
 			return fmt.Errorf("the exporter service started but is not serving %s: %v — its log, %s, says why; "+
 				"it keeps retrying until `make metrics-stop`", addr, err, filepath.Join(f.Config().LogsDir(), "metrics.log"))
 		}
-		logf(fmt.Sprintf("metrics exporter running: http://%s/metrics", addr))
+		logf("metrics exporter running: " + config.MetricsURL(addr))
 		return nil
 	case "stop":
 		if err := f.StopMetrics(); err != nil {
@@ -179,7 +179,7 @@ func status(f *fleet.Fleet) error {
 	fmt.Printf("  token: %s\n", tokenState(f, cfg))
 	metricsState := "not running (make metrics)"
 	if f.MetricsRunning() {
-		metricsState = "http://" + cfg.MetricsAddr + "/metrics"
+		metricsState = config.MetricsURL(cfg.MetricsAddr)
 	}
 	fmt.Printf("  metrics: %s\n", metricsState)
 	for _, w := range ws {
