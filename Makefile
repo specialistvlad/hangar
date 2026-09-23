@@ -123,27 +123,27 @@ COUNTS := $(shell seq 0 32)
 #
 # `make 0` skips the update and the dashboard: a tear-down installs no runner,
 # so making it wait on a download is a network round trip that can only fail.
-$(COUNTS): $(BIN) $(ROOT)/.env
+$(COUNTS): $(ROOT)/.env $(BIN)
 	@if [ "$@" != "0" ]; then $(BIN) update; fi
 	@$(BIN) scale $@
 	@if [ "$@" != "0" ]; then $(BIN) watch; fi
 
-watch: $(BIN) $(ROOT)/.env ## Dashboard only — never starts, stops or changes anything
+watch: $(ROOT)/.env $(BIN) ## Dashboard only — never starts, stops or changes anything
 	@$(BIN) watch
 
-update: $(BIN) $(ROOT)/.env ## Fetch the newest actions/runner release into .cache
+update: $(ROOT)/.env $(BIN) ## Fetch the newest actions/runner release into .cache
 	@$(BIN) update
 
-status: $(BIN) $(ROOT)/.env ## One-shot fleet summary, no TUI
+status: $(ROOT)/.env $(BIN) ## One-shot fleet summary, no TUI
 	@$(BIN) status
 
-kill: $(BIN) $(ROOT)/.env ## Stop and delete every worker locally, without GitHub
+kill: $(ROOT)/.env $(BIN) ## Stop and delete every worker locally, without GitHub
 	@$(BIN) kill
 
-metrics: $(BIN) $(ROOT)/.env ## Run the Prometheus exporter as a service; re-run after a rebuild
+metrics: $(ROOT)/.env $(BIN) ## Run the Prometheus exporter as a service; re-run after a rebuild
 	@$(BIN) metrics start
 
-metrics-stop: $(BIN) $(ROOT)/.env ## Stop and remove the exporter service
+metrics-stop: $(ROOT)/.env $(BIN) ## Stop and remove the exporter service
 	@$(BIN) metrics stop
 
 # ─── Checks ───────────────────────────────────────────────────────────────────
@@ -299,8 +299,10 @@ $(GOTESTSUM): $(GO)
 	@echo "==> installing gotestsum $(GOTESTSUM_VERSION) into .bin/"
 	@GOFLAGS= GOBIN=$(ROOT)/.bin $(GO) install gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
 
-# First run bootstraps .env and stops, rather than failing deeper in with a
-# confusing error about a missing token.
+# First run bootstraps .env and stops, before a missing token can fail
+# anything deeper in with a confusing error. The fleet targets list it ahead
+# of $(BIN), so a fresh checkout gets its .env without first downloading a
+# toolchain or building — offline as well.
 $(ROOT)/.env:
 	@cp $(ROOT)/.env.example $(ROOT)/.env
 	@chmod 600 $(ROOT)/.env
