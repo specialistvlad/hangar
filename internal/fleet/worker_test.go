@@ -168,6 +168,61 @@ func TestLockScale(t *testing.T) {
 	again()
 }
 
+// The waiting variant — what `make N` uses — must block while another
+// process holds the lock, report that it is waiting, and acquire it once the
+// holder releases. TestLockScale exercises only the non-waiting branch a
+// dashboard keypress takes.
+func TestLockScaleWaits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".scale.lock")
+	unlock, err := lockScale(path, func(string) {}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		unlock func()
+		err    error
+	}
+	waiting := make(chan string, 1)
+	done := make(chan result, 1)
+	go func() {
+		u, err := lockScale(path, func(s string) { waiting <- s }, true)
+		done <- result{u, err}
+	}()
+
+	select {
+	case msg := <-waiting:
+		if !strings.Contains(msg, "another scale is running") {
+			t.Errorf("progress = %q, want it to mention a running scale", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the blocking lock never reported that it was waiting")
+	}
+
+	select {
+	case r := <-done:
+		t.Fatalf("the blocking lock returned before the holder released it: %v", r.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	unlock()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("the blocking lock did not acquire after release: %v", r.err)
+		}
+		// Acquiring again while it is still held proves the returned unlock
+		// really holds the flock, not just that lockScale returned.
+		if _, err := lockScale(path, func(string) {}, false); !errors.Is(err, ErrScaleBusy) {
+			t.Errorf("lock still held by the waiter should report ErrScaleBusy, got %v", err)
+		}
+		r.unlock()
+	case <-time.After(5 * time.Second):
+		t.Fatal("the blocking lock did not acquire within the timeout after release")
+	}
+}
+
 // A TMPDIR under a shared WORKER_TMP_ROOT may already exist. Only a real
 // directory owned by this account is taken over, and the bits asked for are
 // cleared.
