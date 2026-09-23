@@ -180,7 +180,7 @@ func TestCleanSharePath(t *testing.T) {
 
 	// A share entry names something inside the real home. Anything that escapes
 	// it would quietly link a worker at an arbitrary path.
-	for _, bad := range []string{"", "   ", "/etc/passwd", "..", "../..", "../.ssh", "a/../../b", "a/.."} {
+	for _, bad := range []string{"", "   ", "/etc/passwd", "..", "../..", "../.ssh", "a/../../b", "a/..", ".", "./", "././"} {
 		if got, err := cleanSharePath(bad); err == nil {
 			t.Errorf("cleanSharePath(%q) should have failed, got %q", bad, got)
 		}
