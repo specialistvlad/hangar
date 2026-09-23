@@ -81,9 +81,10 @@ this.
 ## Requirements
 
 - **macOS or Linux.** On macOS, launchd supervises the workers and Docker Desktop
-  runs the builds. On Linux, the user's systemd manager supervises them and the
-  system docker daemon runs the builds — see [Running on Linux](#running-on-linux)
-  for the one-time setup. Anything else has no supervisor and does not build.
+  runs the builds. On Linux, the user's systemd manager supervises them and a
+  docker daemon, system-wide or rootless, runs the builds — see
+  [Running on Linux](#running-on-linux) for the one-time setup. Anything else has
+  no supervisor and does not build.
 - **A GitHub token that can manage the org's runners** — see below.
 - `make`, `curl`, `tar` and `git`. If a matching Go is already installed hangar uses
   it; otherwise it downloads a private one into `.toolchain/`, so a machine with no
@@ -148,9 +149,13 @@ someone is watching it.
 The restart matters because a running manager keeps the groups it started with, and
 every worker inherits them. A manager that was already up when `usermod` ran never
 gains `docker` — and once lingering is on, logging out and back in does not restart
-it. The restart stops only that user's services, not the shell you are in; a reboot
-works too. `make <n>` checks both — lingering, and that the manager can open the
-docker socket — and refuses to scale until they hold.
+it; a reboot works too. The restart stops every unit the manager runs, not only the
+worker whose provisioning tripped the check — on a fleet that is already up, that
+means every `hangar-w<n>.service` and `hangar-metrics.service`, including any job
+mid-run. Wait until no worker is busy, or run `make 0` first, before restarting a
+live fleet. `make <n>` checks both — lingering, and that the manager can open the
+docker socket — and refuses to scale until they hold, printing this same warning
+when the restart is still needed.
 
 The runner itself needs the ICU library. Most distributions ship it; if registration
 complains, install it as an administrator — the fleet's own account has no sudo — then
@@ -213,11 +218,12 @@ start, on both platforms, each worker recreates its directory — so a reboot th
 empties the tmpfs does no harm — and refuses to start unless both `<root>/w<n>` and the
 root itself belong to the fleet's account and are not symlinks: whoever owns the root
 could swap a worker's directory, and the scripts jobs write there, under a running
-build. hangar also refuses a root anywhere under a directory every account can write
-to — `/tmp`, `/var/tmp`, `/dev/shm` — because the system's tmp cleaner sweeps those
-while workers run, and anyone could recreate what it removed. Use a dedicated mount or
-directory. hangar deletes `<root>/w<n>` when the worker goes. On the host this was built
-for, fstab mounts it as
+build. hangar also refuses a root that is itself, or sits inside, a directory every
+account can write to — `/tmp`, `/var/tmp`, `/dev/shm`, or a tmpfs mounted with a
+permissive mode — because the system's tmp cleaner sweeps those while workers run,
+and anyone could recreate what it removed, or write there directly. Use a mount or
+directory only the fleet's account can write to. hangar deletes `<root>/w<n>` when
+the worker goes. On the host this was built for, fstab mounts it as
 `tmpfs /srv/hangar/tmp tmpfs size=32G,mode=0700,uid=<hangar>,gid=<hangar>,nosuid,nodev 0 0`.
 
 ## Getting a token
@@ -319,6 +325,12 @@ every worker with a directory under `workers/`, a service the supervisor still
 knows (a `com.hangar.w<n>` launchd agent, or a `hangar-w<n>.service` systemd
 unit), or both.
 
+When a worker's directory cannot be fully removed — typically files a job's
+container wrote as root — `make kill` still stops and unregisters the rest, but
+prints a distinct `killed N worker(s), M left on disk` summary and exits non-zero,
+so a script or an operator running it unattended can tell a clean kill from one
+that still needs finishing by hand.
+
 What it trades away is the server side. The registrations stay, listed in the
 org as **offline**, until a working token exists or an operator deletes them in
 *Settings → Actions → Runners*. Prefer `make 0` whenever the token works.
@@ -331,7 +343,11 @@ macOS, loaded at login — restarted if it dies. It answers Prometheus scrapes a
 `http://127.0.0.1:9151/metrics` (`METRICS_ADDR` in `.env`), and `make metrics` returns
 only once that address answers with this build's own `hangar_build_info`, so a port
 held by something else is reported rather than mistaken for success. `make status`
-shows whether it is up. Re-run `make metrics` after rebuilding hangar to restart it on
+shows whether it is up, and both it and `make metrics` print the endpoint as a URL a
+browser or curl can open — substituting `127.0.0.1` for an empty or unspecified host,
+so a `METRICS_ADDR` of `:9151` (valid — it means every interface) reads as
+`http://127.0.0.1:9151/metrics` rather than the unusable `http://:9151/metrics`.
+Re-run `make metrics` after rebuilding hangar to restart it on
 the new binary. The endpoint has no authentication: loopback keeps it off the network,
 not away from other accounts on the machine — see [SECURITY.md](SECURITY.md).
 
@@ -344,6 +360,8 @@ not away from other accounts on the machine — see [SECURITY.md](SECURITY.md).
 | `hangar_worker_last_job_end_timestamp_seconds` | `worker`, `runner` | when the last job ended |
 | `hangar_jobs_total` | `worker`, `runner`, `result` | jobs finished: `succeeded`, `failed`, `canceled` |
 | `hangar_job_duration_seconds` | `result` | histogram, 30 s to 2 h |
+| `hangar_fleet_list_failures_total` | | fleet listings that failed to reach the supervisor, since the exporter started |
+| `hangar_fleet_list_success_timestamp_seconds` | | unix time of the fleet listing that last reached the supervisor; 0 before the first one succeeds |
 | `hangar_workers_configured` | | workers on this machine |
 | `hangar_build_info` | `version`, `commit` | 1 |
 
@@ -355,6 +373,19 @@ needed. Counters count from the moment the exporter started; after a restart it
 restores what is running from the logs but does not count finished jobs again, so
 query them with `rate()` or `increase()`. The text format is written without a client
 library — hangar adds no dependency a page of stdlib covers.
+
+`hangar_worker_job_info` adds one series per job: `job_name`, `workflow` and `repo`
+change from one job to the next and `run_id` is unique to a single run, so a busy
+fleet accumulates one time series per completed job for as long as Prometheus keeps
+it. A `metric_relabel_configs` rule dropping the `run_id` label at scrape time keeps
+the family bounded by workflow and repo instead, for a host running a long retention
+window.
+
+`hangar_fleet_list_failures_total` and `hangar_fleet_list_success_timestamp_seconds`
+read whether that same poll's fleet listing reached the supervisor. When a listing
+fails, every other worker gauge is left exactly as it was rather than cleared, so
+these two are how an alert tells a fleet that is genuinely idle and static from one
+whose listing has simply stopped answering.
 
 ## The dashboard
 
@@ -394,7 +425,11 @@ Docker gets its own row because that is where build CPU actually lands — the
 runner processes themselves sit near idle while BuildKit does the work. On macOS
 the row is Docker Desktop's virtual machine; on Linux it is the sum of the docker
 daemon, containerd, every container and every BuildKit build step, read from their
-cgroups, or `n/a` on a host without cgroup v2.
+cgroups — a system-wide daemon under `system.slice` and rootless docker under the
+invoking user's own systemd instance (`user.slice/user-<uid>.slice/user@<uid>.service/…`)
+both count, or `n/a` on a host without cgroup v2. Docker Desktop for Linux runs its
+daemon inside a VM guest kernel, so no matching cgroup exists on the host and its
+CPU is not counted.
 
 Free disk shows the filesystem closest to running out among those a build writes to,
 labeled with which one it is: the workers directory, `WORKER_TMP_ROOT` when set, and on
@@ -455,8 +490,9 @@ Two things a private `HOME` cannot cover, both handled during provisioning:
   buildx and compose there — it is symlinked in, or `docker buildx build` fails with
   *unknown command*. Otherwise, as on a Linux host with system-wide plugins, the worker
   gets a private, writable, empty one, and the CLI finds the system's plugins as usual.
-  `DOCKER_HOST` is set explicitly, or the socket falls back to `/var/run/docker.sock`,
-  which Docker Desktop never creates.
+  `DOCKER_HOST` is set explicitly, or hangar finds the socket itself — Docker
+  Desktop's, then rootless Docker's per-user socket, then the system daemon's
+  `/var/run/docker.sock`, which Docker Desktop never creates.
 
 ### Where credentials actually live
 
@@ -494,6 +530,18 @@ both. The third is the exporter's own service, `com.hangar.metrics.plist` or
 `hangar-metrics.service`, written by `make metrics`. `make 0` and `make kill` leave it
 running on purpose — it then reports an empty fleet — and `make metrics-stop` or
 `make nuke` removes it.
+
+One account runs one hangar fleet. A second checkout sharing the account — another
+worktree or clone, say staging next to production — is not a second fleet: it writes
+into the same `~/Library/LaunchAgents` or `~/.config/systemd/user`, so its worker and
+exporter names collide with the first checkout's. Before writing or restarting a
+unit or plist, hangar reads back the `WorkingDirectory` any existing one already
+carries: when it falls outside this checkout's own tree, hangar refuses, naming the
+checkout that owns it, instead of overwriting or restarting someone else's fleet.
+Stopping a worker, listing what is running and `make kill` apply the same check the
+other way — a unit or plist belonging to another checkout is left alone and out of
+this checkout's own view entirely, rather than being stopped, killed or counted as
+this fleet's own.
 
 Settings come from `.env` and nowhere else — the ambient environment is never
 consulted, so a fleet behaves the same from any shell, service manager or cron job.

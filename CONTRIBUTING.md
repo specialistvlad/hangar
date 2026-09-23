@@ -62,10 +62,10 @@ mismatch there is treated as a bug in its own right.
 
 ## Reporting bugs
 
-Include your OS and version, how docker is running (Docker Desktop or a system
-daemon), and the relevant output from `logs/wN.err` or `workers/wN/_diag/` — on
-Linux also `systemctl --user status hangar-wN`. **Scrub tokens before pasting** —
-`_diag` logs and `.env` both contain credentials.
+Include your OS and version, how docker is running (Docker Desktop, a system-wide
+daemon, or rootless), and the relevant output from `logs/wN.err` or
+`workers/wN/_diag/` — on Linux also `systemctl --user status hangar-wN`. **Scrub
+tokens before pasting** — `_diag` logs and `.env` both contain credentials.
 
 ## Conduct
 
