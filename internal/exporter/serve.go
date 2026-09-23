@@ -38,7 +38,16 @@ func Serve(ctx context.Context, f *fleet.Fleet, addr, version, commit string) er
 // functions, so a test can run it on a free port against a directory it made.
 func serve(ctx context.Context, ln net.Listener, c *Collector, list func() ([]fleet.Worker, error),
 	workerDir func(int) string, every time.Duration) error {
-	srv := &http.Server{Handler: handler(c), ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{
+		Handler: handler(c),
+		// A scrape completes in well under a second; these bound how long a
+		// client that never finishes reading or writing can tie up a
+		// connection, so a stuck /metrics client cannot freeze the poll loop
+		// through Render's lock (see Render's own comment).
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 

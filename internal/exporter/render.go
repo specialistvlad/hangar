@@ -1,16 +1,23 @@
 package exporter
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"sort"
 	"time"
 )
 
-// Render writes every family in the text exposition format.
-func (c *Collector) Render(out io.Writer) {
+// Render writes every family in the text exposition format. The exposition
+// is built into a buffer under c.mu and copied to dst only once the lock is
+// released, so a slow or stalled scrape client blocked on dst.Write cannot
+// hold c.mu and, through it, stall Apply and SetFleet — which would otherwise
+// back up the events channel and freeze every worker's job tracking.
+func (c *Collector) Render(dst io.Writer) {
+	var buf bytes.Buffer
+	out := &buf
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	idx := make([]int, 0, len(c.workers))
 	for n := range c.workers {
 		idx = append(idx, n)
@@ -77,4 +84,7 @@ func (c *Collector) Render(out io.Writer) {
 	}
 	family(out, "hangar_job_duration_seconds", "histogram", "Job duration, start to end, by result.")
 	c.durations.write(out, "hangar_job_duration_seconds", "result")
+
+	c.mu.Unlock()
+	_, _ = buf.WriteTo(dst)
 }
