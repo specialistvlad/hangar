@@ -107,6 +107,32 @@ func TestMigrateMarkers(t *testing.T) {
 	}
 }
 
+// checkedList must stop a scale outright when WorkersDir itself cannot be
+// read, not fold that failure into an already-empty ws the way handing a
+// bare listErr to migrateMarkers alone would: with no entries to inspect,
+// migrateMarkers's loop never runs and returns nil regardless of the error,
+// so a ReadDir failure would look exactly like a genuinely empty fleet and
+// plan() would add back — provision restart — every worker already running.
+func TestCheckedListStopsOnAnUnreadableWorkersDir(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads through any permission bits")
+	}
+	f := New(&config.Config{Root: t.TempDir(), NamePrefix: "t-w"})
+	mkWorker(t, f, 1, true, true) // a healthy, already-running worker
+	if err := os.Chmod(f.cfg.WorkersDir(), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.cfg.WorkersDir(), 0o755) })
+
+	ws, err := f.checkedList(3)
+	if err == nil {
+		t.Fatal("an unreadable WorkersDir must stop the scale, not read as an empty fleet")
+	}
+	if ws != nil {
+		t.Errorf("workers = %v, want nil alongside the error", ws)
+	}
+}
+
 // ListChecked exists so a caller can tell "stopped" from "could not ask the
 // supervisor" — and a ReadDir failure on WorkersDir itself must report the
 // same way, not come back as a clean, empty fleet.

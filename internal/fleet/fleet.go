@@ -69,9 +69,8 @@ func (f *Fleet) scale(n int, progress func(string), wait bool) error {
 	}
 	defer unlock()
 
-	loaded, loadedErr := loadedServices(f.cfg.WorkersDir())
-	ws, readErr := f.list(loaded)
-	if err := f.migrateMarkers(n, ws, errors.Join(loadedErr, readErr)); err != nil {
+	ws, err := f.checkedList(n)
+	if err != nil {
 		return err
 	}
 	add, drop := plan(n, ws)

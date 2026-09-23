@@ -142,3 +142,23 @@ func (f *Fleet) migrateMarkers(n int, ws []Worker, listErr error) error {
 	}
 	return nil
 }
+
+// checkedList lists the fleet for a scale to n and runs migrateMarkers over
+// it. A WorkersDir read failure is checked here, on its own, rather than left
+// for migrateMarkers to notice: with no entries to inspect, an empty result
+// from an unreadable directory is what migrateMarkers's own loop sees for a
+// genuinely empty fleet too, so it would return nil either way. Handing that
+// ws to plan() would then add back, and provision restart, every worker
+// already running — the outage migrateMarkers's listErr check exists to
+// prevent, only worse, since scale() would act rather than merely stall.
+func (f *Fleet) checkedList(n int) ([]Worker, error) {
+	loaded, loadedErr := loadedServices(f.cfg.WorkersDir())
+	ws, readErr := f.list(loaded)
+	if readErr != nil {
+		return nil, fmt.Errorf("cannot tell which workers are running, so not scaling: %w — retry", readErr)
+	}
+	if err := f.migrateMarkers(n, ws, loadedErr); err != nil {
+		return nil, err
+	}
+	return ws, nil
+}
