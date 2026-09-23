@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/specialistvlad/hangar/internal/config"
 )
 
 // The exporter's unit restarts it like a worker's does, starts at boot, and
@@ -61,5 +63,43 @@ func TestForeignMetricsRoot(t *testing.T) {
 	write(renderMetricsUnit("127.0.0.1:9151", "/srv/a", "/srv/b/.bin/hangar", "/srv/a/logs/metrics.log"))
 	if root, ok := foreignMetricsRoot(path, "/srv/a"); !ok || root != "/srv/b" {
 		t.Errorf("foreignMetricsRoot(bin=/srv/b/.bin/hangar) = %q, %v, want /srv/b, true", root, ok)
+	}
+}
+
+// fakeSystemctlAlwaysUp puts a script named systemctl ahead of the real one
+// on PATH that reports a live pid for any `show --property=MainPID` query,
+// standing in for a user manager where the queried unit is actually running
+// — so a test can tell whether MetricsRunning asked at all.
+func fakeSystemctlAlwaysUp(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte("#!/bin/sh\necho 4242\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// MetricsRunning must report false for a checkout that never started its own
+// exporter, even though another checkout's is live under the same account —
+// `make status` must not print a green metrics line, on what may even be a
+// different port, for an exporter this checkout never started. The fake
+// systemctl reports the unit as up unconditionally, so this only passes if
+// MetricsRunning checks ownership before it ever asks.
+func TestMetricsRunningIgnoresAForeignUnit(t *testing.T) {
+	fakeSystemctlAlwaysUp(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "systemd", "user")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := renderMetricsUnit("127.0.0.1:9151", "/srv/b", "/srv/b/.bin/hangar", "/srv/b/logs/metrics.log")
+	if err := os.WriteFile(filepath.Join(dir, metricsUnit), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f := New(&config.Config{Root: "/srv/a", NamePrefix: "t-w"})
+	if f.MetricsRunning() {
+		t.Error("a foreign checkout's exporter must not report as this checkout's own")
 	}
 }

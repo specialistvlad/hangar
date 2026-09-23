@@ -101,8 +101,17 @@ func (f *Fleet) StopMetrics() error {
 	return nil
 }
 
-// MetricsRunning says whether the exporter's service has a live process.
+// MetricsRunning says whether this checkout's own exporter has a live
+// process — a service that belongs to a different checkout sharing the
+// account reports as not running here, the same ownership foreignMetricsRoot
+// already gives StartMetrics and StopMetrics, so `make status` never borrows
+// another checkout's exporter, on what may even be another checkout's port.
 func (f *Fleet) MetricsRunning() bool {
+	if dir, err := userUnitDir(); err == nil {
+		if _, ok := foreignMetricsRoot(filepath.Join(dir, metricsUnit), f.cfg.Root); ok {
+			return false
+		}
+	}
 	out, err := systemctl(systemctlTimeout, "show", "--property=MainPID", "--value", metricsUnit)
 	return err == nil && strings.TrimSpace(out) != "" && strings.TrimSpace(out) != "0"
 }

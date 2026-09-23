@@ -106,8 +106,15 @@ func foreignMetricsRoot(path, root string) (string, bool) {
 	return "", false
 }
 
-// MetricsRunning says whether the exporter's agent has a live process.
+// MetricsRunning says whether this checkout's own exporter has a live
+// process — an agent that belongs to a different checkout sharing the
+// account reports as not running here, the same ownership foreignMetricsRoot
+// already gives StartMetrics and StopMetrics, so `make status` never borrows
+// another checkout's exporter, on what may even be another checkout's port.
 func (f *Fleet) MetricsRunning() bool {
+	if _, ok := foreignMetricsRoot(metricsPlistPath(), f.cfg.Root); ok {
+		return false
+	}
 	out, err := runTimeout(launchctlTimeout, "", "launchctl", "list")
 	if err != nil {
 		return false
