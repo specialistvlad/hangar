@@ -30,8 +30,14 @@ type scaleDoneMsg struct {
 	err     error
 }
 
-// scaleBy nudges the desired worker count by delta.
+// scaleBy nudges the desired worker count by delta. Once a quit is pending the
+// target is committed to whatever the in-flight pass reaches, so a further
+// press changes nothing — the header would otherwise promise a worker the
+// dashboard has already decided not to chase.
 func (m *Model) scaleBy(delta int) tea.Cmd {
+	if m.quitting {
+		return nil
+	}
 	have := len(m.workers) // the last listing; polling the disk here would block
 	base := have
 	if m.scaling {
@@ -138,6 +144,15 @@ func (m *Model) pendingLines() []string {
 			prefixStyle(i).Render(fmt.Sprintf("w%-2d", i)), state))
 	}
 	return out
+}
+
+// keysLegend is the footer's key legend. It drops "+/- scale" once a quit is
+// pending, since scaleBy refuses both keys from that point on.
+func (m *Model) keysLegend() string {
+	if m.quitting {
+		return "1-9 focus · a all · f follow · / filter · q quit (runners keep running)"
+	}
+	return "+/- scale · 1-9 focus · a all · f follow · / filter · q quit (runners keep running)"
 }
 
 // scaleNote is the footer's line about scaling: the target and the step it is

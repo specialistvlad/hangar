@@ -172,7 +172,7 @@ func (m *Model) View() string {
 	}
 	rule := stRule.Render(strings.Repeat("─", maxInt(m.w, 1)))
 
-	footer := stDim.Render(" +/- scale · 1-9 focus · a all · f follow · / filter · q quit (runners keep running)")
+	footer := stDim.Render(" " + m.keysLegend())
 	if m.filtering {
 		footer = " " + m.filter.View()
 	} else if m.focus != 0 {

@@ -75,6 +75,24 @@ func TestChaseStopsAtABusyWorker(t *testing.T) {
 	}
 }
 
+// Once q has committed to quitting after the in-flight pass, a further + must
+// not move the target the header promises: the dashboard is not going to
+// chase it.
+func TestScaleIgnoredAfterQuitRequested(t *testing.T) {
+	m := model(t, 1)
+	m.scaling, m.want = true, 1
+	if cmd := m.quit(); cmd != nil || !m.quitting {
+		t.Fatal("q during a running pass should wait, not quit")
+	}
+
+	if cmd := m.scaleBy(1); cmd != nil {
+		t.Fatal("+ after q must not start a pass")
+	}
+	if m.want != 1 {
+		t.Errorf("want target unchanged at 1, got %d", m.want)
+	}
+}
+
 // A keypress never queues behind a scale another process is running.
 func TestKeypressDoesNotWaitForAnotherScale(t *testing.T) {
 	m := model(t, 1)
