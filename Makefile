@@ -77,9 +77,10 @@ HANGAR_VERSION := $(if $(HANGAR_VERSION),$(HANGAR_VERSION),dev)
 LDFLAGS   := -X main.version=$(HANGAR_VERSION) -X main.commit=$(HANGAR_COMMIT)
 # The stamp is rewritten only when it changes, and the binary depends on it:
 # a commit or a clean-up alone must rebuild, or build_info would name a
-# commit the binary was not built from.
+# commit the binary was not built from. Writing it is a recipe further down
+# (see FORCE), not a parse-time $(shell ...): a dry run then changes nothing,
+# and two concurrent makes no longer truncate the same file independently.
 BUILDINFO := $(ROOT)/.bin/.buildinfo
-$(shell mkdir -p $(ROOT)/.bin; printf '%s\n' '$(LDFLAGS)' | cmp -s - $(BUILDINFO) 2>/dev/null || printf '%s\n' '$(LDFLAGS)' > $(BUILDINFO))
 GOLANGCI  := $(ROOT)/.bin/golangci-lint
 GOTESTSUM := $(ROOT)/.bin/gotestsum
 # Only hangar's own sources. A bare find over $(ROOT) would also sweep up the
@@ -110,7 +111,7 @@ export PATH        := $(GOROOT_DIR)/bin:$(PATH)
 
 COUNTS := $(shell seq 0 32)
 
-.PHONY: help build watch update status kill metrics metrics-stop check check-file-length lint test vendor stats clean nuke $(COUNTS)
+.PHONY: help build watch update status kill metrics metrics-stop check check-file-length lint test vendor stats clean nuke FORCE $(COUNTS)
 
 # ─── Fleet ────────────────────────────────────────────────────────────────────
 
@@ -249,6 +250,17 @@ help: ## Show this help
 	@echo "Quitting the dashboard leaves runners running. Use 'make 0' to stop them."
 
 # ─── Plumbing ─────────────────────────────────────────────────────────────────
+
+# FORCE is a prerequisite with no rule of its own, so it is always considered
+# out of date; that makes $(BUILDINFO) re-run its recipe on every build, and
+# the cmp inside — not FORCE — decides whether the file actually needs
+# rewriting. This runs only when something needs $(BUILDINFO), so it is
+# skipped under `make -n` and by targets that don't depend on $(BIN).
+FORCE:
+
+$(BUILDINFO): FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(LDFLAGS)' | cmp -s - $@ 2>/dev/null || printf '%s\n' '$(LDFLAGS)' > $@
 
 # Built beside the old binary and renamed over it: running workers execute this
 # file as their docker credential helper, and a push that runs it mid-copy
