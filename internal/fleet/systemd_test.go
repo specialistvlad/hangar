@@ -17,14 +17,20 @@ import (
 // address (e.g. from a plain `su` rather than `sudo -iu`) would otherwise slip
 // through as.
 func TestUserCmdSetsRuntimeAndBusFromUID(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "/run/user/0")
-	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/0/bus")
+	uid := os.Getuid()
+	// The seeded values stand in for whatever hangar's own process inherited
+	// and must belong to some other uid, or a test run as uid 0 — as the
+	// container this suite's own Linux check runs in does, with no --user
+	// flag — would seed the real uid's own values and could pass whether or
+	// not userCmd actually overrides them.
+	foreign := uid + 1
+	t.Setenv("XDG_RUNTIME_DIR", fmt.Sprintf("/run/user/%d", foreign))
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", fmt.Sprintf("unix:path=/run/user/%d/bus", foreign))
 
 	out, err := userCmd(5*time.Second, "sh", "-c", `printf '%s %s' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS"`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	uid := os.Getuid()
 	want := fmt.Sprintf("/run/user/%d unix:path=/run/user/%d/bus", uid, uid)
 	if out != want {
 		t.Errorf("userCmd env = %q, want %q", out, want)
