@@ -48,12 +48,15 @@ type workerState struct {
 // Collector holds the fleet's state between scrapes. Every method is safe to
 // call from several goroutines.
 type Collector struct {
-	mu        sync.Mutex
-	workers   map[int]*workerState
-	durations *histogram
-	version   string
-	commit    string
-	now       func() time.Time
+	mu            sync.Mutex
+	workers       map[int]*workerState
+	durations     *histogram
+	version       string
+	commit        string
+	now           func() time.Time
+	listFailures  uint64    // fleet listings that failed, since the exporter started
+	listFailing   bool      // whether the most recent listing failed, to log only on change
+	listSuccessAt time.Time // when a listing last succeeded; zero until the first one does
 }
 
 func NewCollector(version, commit string) *Collector {

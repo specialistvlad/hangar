@@ -85,6 +85,17 @@ func (c *Collector) Render(dst io.Writer) {
 	family(out, "hangar_job_duration_seconds", "histogram", "Job duration, start to end, by result.")
 	c.durations.write(out, "hangar_job_duration_seconds", "result")
 
+	family(out, "hangar_fleet_list_failures_total", "counter",
+		"Fleet listings that failed to reach the supervisor, since the exporter started.")
+	sample(out, "hangar_fleet_list_failures_total", nil, float64(c.listFailures))
+	family(out, "hangar_fleet_list_success_timestamp_seconds", "gauge",
+		"Unix time of the fleet listing that last reached the supervisor; 0 before the exporter's first one succeeds.")
+	successAt := 0.0
+	if !c.listSuccessAt.IsZero() {
+		successAt = float64(c.listSuccessAt.Unix())
+	}
+	sample(out, "hangar_fleet_list_success_timestamp_seconds", nil, successAt)
+
 	c.mu.Unlock()
 	_, _ = buf.WriteTo(dst)
 }
