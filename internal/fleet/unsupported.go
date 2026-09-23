@@ -18,5 +18,5 @@ func ownedByMe(fs.FileInfo) bool                           { return false }
 func lockScale(string, func(string), bool) (func(), error) { return func() {}, nil }
 
 func (f *Fleet) StartMetrics() error  { return nil }
-func (f *Fleet) StopMetrics()         {}
+func (f *Fleet) StopMetrics() error   { return nil }
 func (f *Fleet) MetricsRunning() bool { return false }

@@ -51,6 +51,10 @@ func (f *Fleet) StartMetrics() error {
 	if err != nil {
 		return err
 	}
+	path := metricsPlistPath()
+	if other, ok := foreignMetricsRoot(path, f.cfg.Root); ok {
+		return fmt.Errorf("%s already serves the checkout at %s — run `make metrics-stop` there first", metricsLabel, other)
+	}
 	if err := os.MkdirAll(f.cfg.LogsDir(), 0o755); err != nil {
 		return err
 	}
@@ -58,7 +62,6 @@ func (f *Fleet) StartMetrics() error {
 	if err != nil {
 		return err
 	}
-	path := metricsPlistPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -72,10 +75,35 @@ func (f *Fleet) StartMetrics() error {
 	return nil
 }
 
-// StopMetrics unloads the exporter's agent and removes its plist.
-func (f *Fleet) StopMetrics() {
+// StopMetrics unloads the exporter's agent and removes its plist —
+// except for a plist that belongs to a different checkout of this repository
+// sharing the account, which it leaves loaded and says so, rather than
+// stopping another checkout's exporter out from under it.
+func (f *Fleet) StopMetrics() error {
+	path := metricsPlistPath()
+	if other, ok := foreignMetricsRoot(path, f.cfg.Root); ok {
+		return fmt.Errorf("%s belongs to the checkout at %s — leaving it running; stop it from there with `make metrics-stop`", metricsLabel, other)
+	}
 	_, _ = runTimeout(launchctlTimeout, "", "launchctl", "bootout", f.domain()+"/"+metricsLabel)
-	_ = os.Remove(metricsPlistPath())
+	_ = os.Remove(path)
+	return nil
+}
+
+// foreignMetricsRoot reports the checkout root recorded in the exporter's
+// plist at path when it is not root: its WorkingDirectory equals a
+// checkout's Root directly, and its first ProgramArguments entry runs that
+// checkout's own .bin/hangar, so either one landing outside root means the
+// plist already serves a different checkout's fleet — one `make metrics`
+// from another worktree or clone left loaded under this account, still
+// answering on the same port.
+func foreignMetricsRoot(path, root string) (string, bool) {
+	if dir, ok := unitWorkingDir(path); ok && !underDir(dir, root) {
+		return dir, true
+	}
+	if bin, ok := unitBinArg(path); ok && !underDir(bin, root) {
+		return filepath.Dir(filepath.Dir(bin)), true
+	}
+	return "", false
 }
 
 // MetricsRunning says whether the exporter's agent has a live process.

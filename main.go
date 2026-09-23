@@ -158,7 +158,9 @@ func metrics(f *fleet.Fleet, args []string) error {
 		logf(fmt.Sprintf("metrics exporter running: http://%s/metrics", addr))
 		return nil
 	case "stop":
-		f.StopMetrics()
+		if err := f.StopMetrics(); err != nil {
+			return err
+		}
 		logf("metrics exporter stopped")
 		return nil
 	}
