@@ -157,14 +157,16 @@ func (f *Fleet) migrateMarkers(n int, ws []Worker, listErr error) error {
 // ws to plan() would then add back, and provision restart, every worker
 // already running — the outage migrateMarkers's listErr check exists to
 // prevent, only worse, since scale() would act rather than merely stall.
-func (f *Fleet) checkedList(n int) ([]Worker, error) {
+// The supervisor's own error comes back beside the list, for refresh, which
+// must not restart a worker it cannot tell is running.
+func (f *Fleet) checkedList(n int) (ws []Worker, supervisorErr, err error) {
 	loaded, loadedErr := loadedServices(f.cfg.WorkersDir())
 	ws, readErr := f.list(loaded)
 	if readErr != nil {
-		return nil, fmt.Errorf("cannot tell which workers are running, so not scaling: %w — retry", readErr)
+		return nil, nil, fmt.Errorf("cannot tell which workers are running, so not scaling: %w — retry", readErr)
 	}
 	if err := f.migrateMarkers(n, ws, loadedErr); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return ws, nil
+	return ws, loadedErr, nil
 }

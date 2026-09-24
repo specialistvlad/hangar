@@ -34,6 +34,8 @@ const usage = `hangar — GitHub Actions runner fleet for one machine
   hangar metrics start  run serve as a service, restarted on the current binary
   hangar metrics stop   stop and remove that service
 
+  job-hook and job-watch are run by the workers' job hooks, not by hand.
+
 Normally driven via the Makefile: make 4 · make watch · make 0 · make kill · make metrics`
 
 // Set by the Makefile from git; reported by hangar_build_info.
@@ -137,6 +139,9 @@ func run(args []string) error {
 
 	case "metrics":
 		return metrics(f, args[1:])
+
+	case "job-hook", "job-watch":
+		return jobCommand(f, args)
 
 	case "-h", "--help", "help":
 		fmt.Println(usage)

@@ -59,7 +59,8 @@ func (f *Fleet) workerTmp(n int) string {
 	return filepath.Join(f.cfg.WorkerDir(n), "tmp")
 }
 
-// writeIsolation builds worker n's private home and the .env that points at it.
+// writeIsolation builds worker n's private home, then writes the files that
+// point the runner at it — its .env and .path — and the job hooks.
 func (f *Fleet) writeIsolation(n int) error {
 	home := f.workerHome(n)
 	dockerCfg := filepath.Join(home, ".docker")
@@ -78,7 +79,7 @@ func (f *Fleet) writeIsolation(n int) error {
 	if err := f.shareBack(home); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(f.cfg.WorkerDir(n), ".env"), []byte(f.workerEnv(n)), 0o600)
+	return f.writeWorkerFiles(n)
 }
 
 // fixupDocker repairs the two things a private HOME breaks for docker.
@@ -169,8 +170,10 @@ func link(src, dst string) error {
 }
 
 // workerEnv builds the .env the runner injects into every job step. The runner
-// reads it at service start (Runner.Listener.LoadAndSetEnv), so these three
-// variables are the entire isolation mechanism — no wrappers, no interception.
+// reads it at service start (Runner.Listener.LoadAndSetEnv), so HOME, TMPDIR
+// and DOCKER_HOST are the entire isolation mechanism — no wrappers, no
+// interception. The job hooks that enforce the job time limit are named here
+// too; see jobhook.go.
 func (f *Fleet) workerEnv(n int) string {
 	env := []string{
 		"HOME=" + f.workerHome(n),
@@ -186,6 +189,7 @@ func (f *Fleet) workerEnv(n int) string {
 	if f.cfg.DockerHost != "" {
 		env = append(env, "DOCKER_HOST="+f.cfg.DockerHost)
 	}
+	env = append(env, f.hookEnv(n)...)
 	return strings.Join(env, "\n") + "\n"
 }
 
