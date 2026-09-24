@@ -139,7 +139,7 @@ func TestCheckedListStopsOnAnUnreadableWorkersDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(f.cfg.WorkersDir(), 0o755) })
 
-	ws, err := f.checkedList(3)
+	ws, _, err := f.checkedList(3)
 	if err == nil {
 		t.Fatal("an unreadable WorkersDir must stop the scale, not read as an empty fleet")
 	}

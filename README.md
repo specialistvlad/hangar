@@ -298,7 +298,7 @@ gh api /user/memberships/orgs/YOUR-ORG --jq .role   # must print "admin"
 
 | | |
 |---|---|
-| `make <0-32>` | Update the runner, scale the fleet to N, then open the dashboard |
+| `make <0-32>` | Update the runner, scale the fleet to N — rewriting any idle worker whose files are out of date — then open the dashboard |
 | `make watch` | Dashboard — scaling with `+`/`-` is the only thing it changes |
 | `make update` | Fetch the newest `actions/runner` release into `.cache/` |
 | `make status` | One-shot summary, no TUI |
@@ -333,6 +333,48 @@ that still needs finishing by hand.
 What it trades away is the server side. The registrations stay, listed in the
 org as **offline**, until a working token exists or an operator deletes them in
 *Settings → Actions → Runners*. Prefer `make 0` whenever the token works.
+
+## Job time limit
+
+A job that hangs holds its worker until GitHub gives up on it — six hours by
+default. hangar stops any job that runs longer than `JOB_TIMEOUT_MINUTES` in
+`.env` (30 by default, `0` for no limit) and fails it, on both platforms.
+
+It does that from inside the job, through the runner's own
+[job hooks](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/running-scripts-before-or-after-a-job).
+Every worker's `.env` names two small scripts that call `hangar job-hook`:
+
+- **When a job starts**, the hook arms a watchdog for it, detached from the job,
+  and prints the deadline in the job's *Set up runner* step. The clock starts
+  when the runner starts the job, not when the hook runs.
+- **At the deadline** the watchdog stops the step that is running — SIGTERM to
+  its processes, SIGKILL ten seconds later for any that ignored it. The step
+  fails with exit code 143 and the runner carries on the ordinary way: the steps
+  after it are skipped, while `if: failure()` / `always()` steps, post steps and
+  the clean-up of job and service containers still run.
+- **When the job completes**, the hook disarms the watchdog. If the limit
+  passed it adds an annotation naming it — *This job ran past the 30-minute
+  limit this runner sets* — and fails, so the job fails even when the step that
+  was stopped had `continue-on-error`.
+- **If the clean-up hangs too**, five minutes after the step was stopped the
+  watchdog stops the runner's job process itself, which fails the job at once.
+
+The watchdog does not signal the runner first because the runner treats that
+as its own shutdown: it fails the job but skips every step still to come, post
+steps and container clean-up included, leaving them for the next job on the
+same machine to trip over.
+
+The limit is read when each job starts, so changing it needs no restart. The
+hooks themselves are part of a worker's files, which `make <N>` rewrites when
+they no longer match — the case for workers provisioned by a hangar from before
+the limit existed. The runner reads its `.env` only at start, so a rewritten
+worker is restarted, but only once it is idle: a worker in the middle of a job
+is left alone, and the next `make <N>` finishes it.
+
+A container a step starts itself with `docker run` is not the runner's to clean
+up. The Docker CLI passes the SIGTERM on to it, but a program running as a
+container's PID 1 ignores SIGTERM unless it handles it, so such a container
+can outlive the job; `docker run --init` gives it an init that does not.
 
 ## Metrics
 
@@ -463,7 +505,8 @@ There is no supervisor daemon and no log shipping, because neither is needed:
   included. The dashboard tails those two files.
 - **The filesystem is the state.** `workers/wN` directories *are* the fleet. There is
   no registry file that could drift out of sync with reality, and scaling is a diff:
-  `make 4` twice does nothing the second time.
+  `make 4` twice does nothing the second time — unless a setting a worker's files
+  carry changed in between, which the second run applies to every idle worker.
 
 ## What is isolated, and what is not
 

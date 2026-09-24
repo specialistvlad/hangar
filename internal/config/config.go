@@ -37,6 +37,9 @@ type Config struct {
 	TmpRoot string // WORKER_TMP_ROOT
 	// MetricsAddr is where `hangar serve` answers /metrics.
 	MetricsAddr string // METRICS_ADDR
+	// JobTimeoutMinutes is how long a job may run on a worker before hangar
+	// stops it and fails it; 0 means no limit. See jobtimeout.go.
+	JobTimeoutMinutes int // JOB_TIMEOUT_MINUTES
 }
 
 // defaultMetricsAddr is loopback only: the metrics name repositories and jobs,
@@ -88,6 +91,10 @@ func Load(root string) (*Config, error) {
 		}
 		tmpRoot = filepath.Clean(tmpRoot)
 	}
+	jobTimeout, err := parseJobTimeout(env["JOB_TIMEOUT_MINUTES"])
+	if err != nil {
+		return nil, err
+	}
 
 	c := &Config{
 		Root:        root,
@@ -102,6 +109,8 @@ func Load(root string) (*Config, error) {
 		SharePaths:  shares,
 		TmpRoot:     tmpRoot,
 		MetricsAddr: metricsAddr,
+
+		JobTimeoutMinutes: jobTimeout,
 	}
 	if c.DockerHost == "" {
 		c.DockerHost = detectDockerHost()
@@ -199,34 +208,6 @@ func defaultLang(goos string) string {
 		return "en_US.UTF-8"
 	}
 	return "C.UTF-8"
-}
-
-// detectDockerHost finds the daemon socket. A worker with a private HOME has no
-// docker contexts to resolve the daemon from, and Docker Desktop does not
-// create /var/run/docker.sock, so an unset DOCKER_HOST would break every docker
-// step with a confusing "cannot connect" rather than a clear error. Docker
-// Desktop's socket wins when it exists, then rootless dockerd's well-known
-// per-user socket, then the system socket a rootful Linux daemon listens on.
-func detectDockerHost() string {
-	for _, sock := range dockerHostCandidates(os.UserHomeDir, os.Getuid) {
-		if _, err := os.Stat(sock); err == nil {
-			return "unix://" + sock
-		}
-	}
-	return ""
-}
-
-// dockerHostCandidates lists the sockets detectDockerHost probes, in order.
-// It takes its inputs as functions so the ordering can be tested without
-// touching the real home directory or process uid.
-func dockerHostCandidates(userHomeDir func() (string, error), getuid func() int) []string {
-	var candidates []string
-	if home, err := userHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".docker", "run", "docker.sock"))
-	}
-	candidates = append(candidates, filepath.Join("/run", "user", strconv.Itoa(getuid()), "docker.sock"))
-	candidates = append(candidates, "/var/run/docker.sock")
-	return candidates
 }
 
 // splitList parses a comma-separated setting, dropping empty entries.

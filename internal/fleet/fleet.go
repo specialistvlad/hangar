@@ -69,11 +69,14 @@ func (f *Fleet) scale(n int, progress func(string), wait bool) error {
 	}
 	defer unlock()
 
-	ws, err := f.checkedList(n)
+	ws, supervisorErr, err := f.checkedList(n)
 	if err != nil {
 		return err
 	}
 	add, drop := plan(n, ws)
+	if err := f.refresh(n, ws, supervisorErr, progress); err != nil {
+		return err
+	}
 	if len(add) == 0 && len(drop) == 0 {
 		progress(fmt.Sprintf("already at %d worker(s)", n))
 		return nil
@@ -166,15 +169,12 @@ func (f *Fleet) provision(n int, tarball, token string, progress func(string)) (
 			return false, fmt.Errorf("register: %v: %s", err, out)
 		}
 	}
-	// Both of these must follow registration, not precede it. config.sh runs the
+	// This must follow registration, not precede it. config.sh runs the
 	// runner's env.sh, which appends whatever LANG/NVM_BIN/JAVA_HOME happen to be
 	// in the calling shell into .env, and rewrites .path from that same
 	// environment. Writing ours afterwards is what keeps a worker deterministic
 	// rather than a snapshot of whoever ran `make`.
 	if err := f.writeIsolation(n); err != nil {
-		return false, err
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".path"), []byte(f.runnerPath(n)+"\n"), 0o644); err != nil {
 		return false, err
 	}
 	if err := f.startService(n); err != nil {
