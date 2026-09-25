@@ -137,7 +137,7 @@ defaults to; on an older v1 host the fleet runs but the dashboard cannot sample
 docker. Two things have to be true first, and both need root once:
 
 ```bash
-sudo usermod -aG docker "$USER"                  # reach the docker daemon
+sudo usermod -aG docker "$USER"                  # reach the docker daemon (not with DOCKER_HOST=none)
 sudo loginctl enable-linger "$USER"              # start at boot, survive logout
 sudo systemctl restart "user@$(id -u).service"   # only if you were already logged in
 ```
@@ -155,6 +155,12 @@ including any job mid-run. Wait until no worker is busy, or run `make 0` first,
 before restarting a live fleet. `make <n>` checks both — lingering, and that the
 manager can open the docker socket — and refuses to scale until they hold, printing
 this same warning when the restart is still needed.
+
+A host whose jobs get no docker daemon by design — every build goes to a buildx
+remote builder, and the account is kept out of `docker` on purpose — sets
+`DOCKER_HOST=none` in `.env` instead. Hangar then skips the group and the socket
+check, and hands the workers no `DOCKER_HOST`, so their docker CLI resolves its
+builder the same way yours does.
 
 The runner itself needs the ICU library. Most distributions ship it; if registration
 complains, install it as an administrator — the fleet's own account has no sudo — then

@@ -25,7 +25,7 @@ type Config struct {
 	Group      string // RUNNER_GROUP — runner group to register into
 	Labels     string // RUNNER_LABELS — extra labels, may be empty
 	NamePrefix string // RUNNER_NAME_PREFIX — worker N registers as <prefix>N
-	DockerHost string // DOCKER_HOST handed to every worker
+	DockerHost string // DOCKER_HOST handed to every worker; empty for DOCKER_HOST=none
 	RunnerPath string // RUNNER_PATH — PATH a worker's jobs run with
 	Lang       string // RUNNER_LANG — locale for jobs; builds misbehave without one
 	// SharePaths are home-relative paths symlinked from the real home into each
@@ -112,7 +112,12 @@ func Load(root string) (*Config, error) {
 
 		JobTimeoutMinutes: jobTimeout,
 	}
-	if c.DockerHost == "" {
+	switch c.DockerHost {
+	case "none":
+		// Jobs get no docker daemon by design, say a host whose builds go to a buildx
+		// remote builder: there is no socket to find, hand to the workers or check.
+		c.DockerHost = ""
+	case "":
 		c.DockerHost = detectDockerHost()
 	}
 
