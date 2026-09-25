@@ -158,6 +158,15 @@ MainPID=11
 // The restart checkDockerAccess suggests stops every unit the user manager
 // runs, not only the worker whose provision hit the check, so the message
 // must say that before an operator copies the command onto a live fleet.
+// A fleet with no docker daemon (DOCKER_HOST=none) is never asked for the docker
+// group: the check returns before it runs anything through the user manager.
+func TestCheckDockerAccessWithoutADaemon(t *testing.T) {
+	f := New(&config.Config{Root: t.TempDir(), DockerHost: ""})
+	if err := f.checkDockerAccess("hangar"); err != nil {
+		t.Errorf("no daemon: got %v, want no check", err)
+	}
+}
+
 func TestDockerAccessErrWarnsAboutTheWholeFleet(t *testing.T) {
 	err := dockerAccessErr("hangar", "/var/run/docker.sock", 1001)
 	for _, want := range []string{
