@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -100,7 +102,52 @@ func (f *Fleet) startService(n int) error {
 			return fmt.Errorf("systemctl --user %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(out))
 		}
 	}
+	f.reapStrayListeners(n)
 	return nil
+}
+
+// strayGrace is how long a stray listener gets to quit on SIGTERM before SIGKILL.
+const strayGrace = 10 * time.Second
+
+// reapStrayListeners ends the Runner.Listener processes of worker n that its
+// restarted service does not own (procTable.strayListeners): KillMode=process,
+// kept so a runner self-update can outlive the listener, leaves one that was slow
+// to quit in the unit's cgroup, and the restarted runsvc.sh starts a second
+// listener beside it (2026-11-05: a refresh left every worker with two, the old
+// one holding GitHub's session and the new one failing to get one). SIGTERM, then
+// SIGKILL after strayGrace. Best-effort: a process table or a main pid it cannot
+// read leaves the worker as the restart left it.
+func (f *Fleet) reapStrayListeners(n int) {
+	out, err := systemctl(systemctlTimeout, "show", "--property=MainPID", "--value", serviceName(n))
+	if err != nil {
+		return
+	}
+	mainPID, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return
+	}
+	table, err := readProcTable()
+	if err != nil {
+		return
+	}
+	dir := filepath.Clean(f.cfg.WorkerDir(n)) + string(filepath.Separator)
+	inWorker := func(pid int) bool {
+		exe, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+		return err == nil && strings.HasPrefix(exe, dir)
+	}
+	strays := table.strayListeners(mainPID, inWorker)
+	for _, pid := range strays {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	deadline := time.Now().Add(strayGrace)
+	for _, pid := range strays {
+		for syscall.Kill(pid, 0) == nil && time.Now().Before(deadline) {
+			time.Sleep(200 * time.Millisecond)
+		}
+		if syscall.Kill(pid, 0) == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
 }
 
 // stopService stops and disables worker n's unit and removes its file. Every

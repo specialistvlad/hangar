@@ -3,6 +3,7 @@ package fleet
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,10 @@ import (
 // listener stays up between jobs; a Runner.Worker exists only while a job
 // runs, and every step of that job is a descendant of it.
 const runnerWorkerName = "Runner.Worker"
+
+// runnerListenerName is the runner's long-lived process, one per worker, between
+// jobs too. Its 15 characters are exactly what ps's comm column keeps on Linux.
+const runnerListenerName = "Runner.Listener"
 
 // psTimeout bounds one process listing.
 const psTimeout = 10 * time.Second
@@ -127,6 +132,33 @@ func (t procTable) descendants(root int) []int {
 		out = append(out, pid)
 		queue = append(queue, children[pid]...)
 	}
+	return out
+}
+
+// strayListeners lists the Runner.Listener processes of one worker that are not
+// its service's main process nor below it: listeners that outlived the runsvc.sh
+// that started them. KillMode=process signals only the main process on a stop or
+// restart, so a listener slow to quit stays in the unit's cgroup and the restarted
+// runsvc.sh starts a second one beside it; the two share the runner's credentials
+// and GitHub gives one of them the session. inWorker reports whether a pid's
+// executable lives in this worker's directory. mainPID 0 (the service not
+// running) leaves no listener of the worker its own. A self-update's helper is no
+// Runner.Listener and is never listed.
+func (t procTable) strayListeners(mainPID int, inWorker func(pid int) bool) []int {
+	keep := map[int]bool{}
+	if mainPID > 0 {
+		keep[mainPID] = true
+		for _, d := range t.descendants(mainPID) {
+			keep[d] = true
+		}
+	}
+	var out []int
+	for pid, p := range t {
+		if p.Name == runnerListenerName && !keep[pid] && inWorker(pid) {
+			out = append(out, pid)
+		}
+	}
+	sort.Ints(out)
 	return out
 }
 

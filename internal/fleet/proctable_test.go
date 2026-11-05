@@ -100,3 +100,30 @@ func TestProcTableIsChecksTheName(t *testing.T) {
 		t.Error("a different process, or none, under that pid is not the Runner.Worker")
 	}
 }
+
+// A restart under KillMode=process can leave the old listener beside the new one
+// (2026-11-05: every worker a refresh restarted ran two). Only a listener outside
+// the service's tree, in this worker, is a stray: the new listener, a job's
+// worker, another worker's listener and a self-update's helper never are.
+func TestStrayListeners(t *testing.T) {
+	table := procTable{
+		1:   {PID: 1, PPID: 0, Name: "systemd"},
+		100: {PID: 100, PPID: 1, Name: "bash"},              // runsvc.sh, the service's main process
+		101: {PID: 101, PPID: 100, Name: "node"},            // RunnerService.js
+		102: {PID: 102, PPID: 101, Name: "Runner.Listener"}, // the restart's listener
+		103: {PID: 103, PPID: 102, Name: "Runner.Worker"},   // a job it runs
+		50:  {PID: 50, PPID: 1, Name: "Runner.Listener"},    // the old listener, re-parented
+		60:  {PID: 60, PPID: 1, Name: "Runner.Listener"},    // another worker's
+		70:  {PID: 70, PPID: 1, Name: "bash"},               // a self-update's _update.sh
+	}
+	inWorker := func(pid int) bool { return pid != 60 }
+	if got := table.strayListeners(100, inWorker); !reflect.DeepEqual(got, []int{50}) {
+		t.Errorf("running service: strays %v, want [50]", got)
+	}
+	if got := table.strayListeners(0, inWorker); !reflect.DeepEqual(got, []int{50, 102}) {
+		t.Errorf("service not running: strays %v, want [50 102]", got)
+	}
+	if got := table.strayListeners(100, func(int) bool { return false }); got != nil {
+		t.Errorf("no listener in this worker: strays %v, want none", got)
+	}
+}
